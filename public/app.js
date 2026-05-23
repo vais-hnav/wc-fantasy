@@ -278,6 +278,17 @@ function navigate(path, replace = false) {
   }
   state.route = gated;
   render();
+  if (state.route === "/admin" && state.admin.token && !state.admin.user) {
+    state.loading = true;
+    render();
+    hydrateAdmin()
+      .catch(() => clearAdminSession())
+      .finally(() => {
+        state.loading = false;
+        render();
+      });
+  }
+  hydrateRouteData();
 }
 
 function tz() {
@@ -1734,17 +1745,55 @@ function leagueModalHtml() {
 }
 
 async function loadPublicData() {
-  const [provider, nations, comingUp, standings, players, managers, faqs] = await Promise.all([
-    api("/api/provider", { auth: false }),
-    api("/api/nations", { auth: false }),
-    api("/api/coming-up", { auth: false }),
-    api("/api/standings", { auth: false }),
+  const payload = await api("/api/bootstrap", { auth: false });
+  state.provider = payload.provider;
+  state.publicData = {
+    nations: payload.nations || [],
+    fixtures: payload.standings?.fixtures || [],
+    comingUp: payload.comingUp || { day: null, fixtures: [] },
+    standings: payload.standings || null,
+    players: state.publicData.players || [],
+    managers: state.publicData.managers || [],
+    faqs: state.publicData.faqs || [],
+  };
+}
+
+async function ensureFantasyData() {
+  if (state.publicData.players.length && state.publicData.managers.length) return;
+  const [players, managers] = await Promise.all([
     api("/api/fantasy/players", { auth: false }),
     api("/api/fantasy/managers", { auth: false }),
-    api("/api/help/faqs", { auth: false }),
   ]);
-  state.provider = provider;
-  state.publicData = { nations, fixtures: standings.fixtures, comingUp, standings, players, managers, faqs };
+  state.publicData.players = players;
+  state.publicData.managers = managers;
+}
+
+async function ensureFaqData() {
+  if (state.publicData.faqs.length) return;
+  state.publicData.faqs = await api("/api/help/faqs", { auth: false });
+}
+
+function hydrateRouteData() {
+  if (state.route === "/fantasy" && (!state.publicData.players.length || !state.publicData.managers.length)) {
+    state.loading = true;
+    render();
+    ensureFantasyData()
+      .catch((error) => pushToast("error", error.message || "Could not load fantasy data."))
+      .finally(() => {
+        state.loading = false;
+        render();
+      });
+  }
+  if (state.route === "/support" && !state.publicData.faqs.length) {
+    state.loading = true;
+    render();
+    ensureFaqData()
+      .catch((error) => pushToast("error", error.message || "Could not load support content."))
+      .finally(() => {
+        state.loading = false;
+        render();
+      });
+  }
 }
 
 async function hydrateSession() {
@@ -1793,21 +1842,20 @@ async function reloadAuthedData() {
 async function boot() {
   render();
   try {
-    await loadPublicData();
+    const tasks = [loadPublicData()];
     if (state.session.token) {
-      try {
-        await hydrateSession();
-      } catch {
-        clearSession();
-      }
+      tasks.push(hydrateSession().catch(() => clearSession()));
     }
-    if (state.admin.token) {
-      try {
-        await hydrateAdmin();
-      } catch {
-        clearAdminSession();
-      }
+    if (state.admin.token && state.route === "/admin") {
+      tasks.push(hydrateAdmin().catch(() => clearAdminSession()));
     }
+    if (state.route === "/fantasy") {
+      tasks.push(ensureFantasyData());
+    }
+    if (state.route === "/support") {
+      tasks.push(ensureFaqData());
+    }
+    await Promise.all(tasks);
   } catch (error) {
     pushToast("error", error.message || "Could not load WC26.");
   } finally {
@@ -2099,6 +2147,17 @@ window.addEventListener("popstate", () => {
   state.route = normalizePath(location.pathname);
   if (PROTECTED_ROUTES.has(state.route) && !state.session.user) state.route = "/auth";
   render();
+  if (state.route === "/admin" && state.admin.token && !state.admin.user) {
+    state.loading = true;
+    render();
+    hydrateAdmin()
+      .catch(() => clearAdminSession())
+      .finally(() => {
+        state.loading = false;
+        render();
+      });
+  }
+  hydrateRouteData();
 });
 
 window.addEventListener("keydown", (event) => {

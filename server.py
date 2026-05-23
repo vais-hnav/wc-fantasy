@@ -154,6 +154,17 @@ def write_cache(name, payload):
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def clear_cache(name):
+    path = CACHE_DIR / f"{name}.json"
+    if path.exists():
+        path.unlink()
+
+
+def clear_derived_caches():
+    for name in ["coming_up", "standings_payload", "fantasy_catalog", "bootstrap_public"]:
+        clear_cache(name)
+
+
 def with_cache(name, max_age_seconds, producer, fallback):
     cached = read_cache(name, max_age_seconds)
     if cached is not None:
@@ -458,31 +469,34 @@ def iso_to_datetime(value):
 
 
 def next_coming_up():
-    fixtures = get_fixtures()
-    nations_by_code = nation_map()
-    now = datetime.now(timezone.utc)
-    upcoming = []
-    for fixture in fixtures:
-        try:
-            kickoff = iso_to_datetime(fixture["kickoff_at"])
-        except Exception:
-            continue
-        if kickoff >= now:
-            upcoming.append((kickoff, fixture))
-    upcoming.sort(key=lambda item: item[0])
-    if not upcoming:
-        return {"day": None, "fixtures": []}
+    def producer():
+        fixtures = get_fixtures()
+        nations_by_code = nation_map()
+        now = datetime.now(timezone.utc)
+        upcoming = []
+        for fixture in fixtures:
+            try:
+                kickoff = iso_to_datetime(fixture["kickoff_at"])
+            except Exception:
+                continue
+            if kickoff >= now:
+                upcoming.append((kickoff, fixture))
+        upcoming.sort(key=lambda item: item[0])
+        if not upcoming:
+            return {"day": None, "fixtures": []}
 
-    day = upcoming[0][0].date()
-    day_fixtures = []
-    for kickoff, fixture in upcoming:
-        if kickoff.date() != day:
-            continue
-        enriched = dict(fixture)
-        enriched["home_nation"] = nations_by_code.get(fixture.get("home_nation_code"))
-        enriched["away_nation"] = nations_by_code.get(fixture.get("away_nation_code"))
-        day_fixtures.append(enriched)
-    return {"day": day.isoformat(), "fixtures": day_fixtures}
+        day = upcoming[0][0].date()
+        day_fixtures = []
+        for kickoff, fixture in upcoming:
+            if kickoff.date() != day:
+                continue
+            enriched = dict(fixture)
+            enriched["home_nation"] = nations_by_code.get(fixture.get("home_nation_code"))
+            enriched["away_nation"] = nations_by_code.get(fixture.get("away_nation_code"))
+            day_fixtures.append(enriched)
+        return {"day": day.isoformat(), "fixtures": day_fixtures}
+
+    return with_cache("coming_up", 60, producer, {"day": None, "fixtures": []})
 
 
 def table_for_group(fixtures, nations):
@@ -1625,35 +1639,38 @@ def delete_local_account_data(user_id):
 
 
 def fantasy_catalog():
-    nations = nation_map()
-    player_points, played = fpl_points_by_player()
-    players = []
-    for player in get_players():
-        nation = nations.get(player.get("nation_code"))
-        if not nation or player.get("withdrawn"):
-            continue
-        players.append(
-            {
-                "id": player["id"],
-                "name": player.get("name"),
-                "first_name": player.get("first_name"),
-                "last_name": player.get("last_name"),
-                "position": player.get("position"),
-                "club": player.get("club"),
-                "nation": nation,
-                "price": float(player.get("price_millions") or 0),
-                "caps": int(player.get("caps") or 0),
-                "goals": int(player.get("international_goals") or 0),
-                "star_rating": int(player.get("star_rating") or 0),
-                "recent_form": float(player.get("recent_form") or 0),
-                "total_fantasy_points": int(player.get("total_fantasy_points") or 0),
-                "fpl_points": int(player_points.get(player["id"], 0)),
-                "fpl_played": bool(played.get(player["id"], False)),
-                "injured": bool(player.get("injured")),
-                "suspended": bool(player.get("suspended")),
-            }
-        )
-    return players
+    def producer():
+        nations = nation_map()
+        player_points, played = fpl_points_by_player()
+        players = []
+        for player in get_players():
+            nation = nations.get(player.get("nation_code"))
+            if not nation or player.get("withdrawn"):
+                continue
+            players.append(
+                {
+                    "id": player["id"],
+                    "name": player.get("name"),
+                    "first_name": player.get("first_name"),
+                    "last_name": player.get("last_name"),
+                    "position": player.get("position"),
+                    "club": player.get("club"),
+                    "nation": nation,
+                    "price": float(player.get("price_millions") or 0),
+                    "caps": int(player.get("caps") or 0),
+                    "goals": int(player.get("international_goals") or 0),
+                    "star_rating": int(player.get("star_rating") or 0),
+                    "recent_form": float(player.get("recent_form") or 0),
+                    "total_fantasy_points": int(player.get("total_fantasy_points") or 0),
+                    "fpl_points": int(player_points.get(player["id"], 0)),
+                    "fpl_played": bool(played.get(player["id"], False)),
+                    "injured": bool(player.get("injured")),
+                    "suspended": bool(player.get("suspended")),
+                }
+            )
+        return players
+
+    return with_cache("fantasy_catalog", 60, producer, [])
 
 
 def manager_catalog():
@@ -1674,24 +1691,34 @@ def manager_catalog():
 
 
 def standings_payload():
-    groups = build_group_tables()
-    thirds = build_best_thirds(groups)
-    nations_by_code = nation_map()
-    fixtures = get_fixtures()
-    enriched_fixtures = []
-    for fixture in fixtures:
-        item = dict(fixture)
-        item["home_nation"] = nations_by_code.get(fixture.get("home_nation_code"))
-        item["away_nation"] = nations_by_code.get(fixture.get("away_nation_code"))
-        enriched_fixtures.append(item)
-    return {
-        "groups": groups,
-        "thirds": thirds,
-        "bracket": build_bracket(),
-        "fixtures": enriched_fixtures,
-        "playerStats": player_stat_leaders(),
-        "goalEvents": get_match_goal_events(),
-    }
+    def producer():
+        groups = build_group_tables()
+        thirds = build_best_thirds(groups)
+        nations_by_code = nation_map()
+        fixtures = get_fixtures()
+        enriched_fixtures = []
+        for fixture in fixtures:
+            item = dict(fixture)
+            item["home_nation"] = nations_by_code.get(fixture.get("home_nation_code"))
+            item["away_nation"] = nations_by_code.get(fixture.get("away_nation_code"))
+            enriched_fixtures.append(item)
+        return {
+            "groups": groups,
+            "thirds": thirds,
+            "bracket": build_bracket(),
+            "fixtures": enriched_fixtures,
+            "playerStats": player_stat_leaders(),
+            "goalEvents": get_match_goal_events(),
+        }
+
+    return with_cache("standings_payload", 60, producer, {
+        "groups": {},
+        "thirds": [],
+        "bracket": {},
+        "fixtures": [],
+        "playerStats": {},
+        "goalEvents": [],
+    })
 
 
 def auth_session_payload(token):
@@ -1857,6 +1884,7 @@ def save_editor_payload(kind, payload):
     if error:
         return None, error
     save_store(store_path, normalized)
+    clear_derived_caches()
     if kind in {"fixtures", "players", "managers", "goalEvents", "matchPlayerStats", "scoringRules"}:
         refreshed = refresh_all_fantasy_state()
     else:
@@ -1877,6 +1905,7 @@ def reset_editor_payload(kind):
         return None, "Unknown editor kind."
     empty = {} if kind == "scoringRules" else []
     save_store(store_path, empty)
+    clear_derived_caches()
     refreshed = refresh_all_fantasy_state()
     return {"reset": kind, "refresh": refreshed}
 
@@ -1922,6 +1951,42 @@ def admin_dashboard_payload():
     }
 
 
+def public_bootstrap_payload():
+    def producer():
+        provider = get_provider_status()
+        standings = standings_payload()
+        return {
+            "provider": provider,
+            "nations": get_nations(),
+            "comingUp": next_coming_up(),
+            "standings": standings,
+        }
+
+    return with_cache("bootstrap_public", 60, producer, {
+        "provider": None,
+        "nations": [],
+        "comingUp": {"day": None, "fixtures": []},
+        "standings": {"groups": {}, "thirds": [], "bracket": {}, "fixtures": [], "playerStats": {}, "goalEvents": []},
+    })
+
+
+def help_faqs():
+    return [
+        {
+            "question": "How does Fantasy XI scoring work here?",
+            "answer": "Fantasy XI uses FPL-style scoring for minutes, goals, assists, clean sheets, saves and card deductions. Bonus points and defensive contribution points are excluded.",
+        },
+        {
+            "question": "Can I join private leagues?",
+            "answer": "Yes. Create a fantasy league, copy the invite code and share it with your group.",
+        },
+        {
+            "question": "Where can I get help?",
+            "answer": "Use Contact support from your profile. Requests are saved locally so staff can review them from admin.",
+        },
+    ]
+
+
 class WC26Handler(SimpleHTTPRequestHandler):
     server_version = "WC26/2.0"
 
@@ -1952,6 +2017,8 @@ class WC26Handler(SimpleHTTPRequestHandler):
             if not admin_auth_required(self):
                 return
             return json_response(self, admin_dashboard_payload())
+        if path == "/api/bootstrap":
+            return json_response(self, public_bootstrap_payload())
         if path == "/api/nations":
             return json_response(self, get_nations())
         if path == "/api/fixtures":
@@ -1965,23 +2032,7 @@ class WC26Handler(SimpleHTTPRequestHandler):
         if path == "/api/fantasy/managers":
             return json_response(self, manager_catalog())
         if path == "/api/help/faqs":
-            return json_response(
-                self,
-                [
-                    {
-                        "question": "How does Fantasy XI scoring work here?",
-                        "answer": "Fantasy XI uses FPL-style scoring for minutes, goals, assists, clean sheets, saves and card deductions. Bonus points and defensive contribution points are excluded.",
-                    },
-                    {
-                        "question": "Can I join private leagues?",
-                        "answer": "Yes. Create a fantasy league, copy the invite code and share it with your group.",
-                    },
-                    {
-                        "question": "Where can I get help?",
-                        "answer": "Use Contact support from your profile. Requests are saved locally so staff can review them from admin.",
-                    },
-                ],
-            )
+            return json_response(self, help_faqs())
         if path == "/api/auth/me":
             token = extract_bearer_token(self)
             payload = auth_session_payload(token)
