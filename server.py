@@ -7,7 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -46,6 +46,7 @@ EDITABLE_MANAGERS_STORE = DATA_DIR / "editable_managers.json"
 EDITABLE_GOAL_EVENTS_STORE = DATA_DIR / "editable_goal_events.json"
 EDITABLE_MATCH_PLAYER_STATS_STORE = DATA_DIR / "editable_match_player_stats.json"
 SCORING_RULES_STORE = DATA_DIR / "scoring_rules.json"
+DEADLINE_OVERRIDES_STORE = DATA_DIR / "deadline_overrides.json"
 
 HOST_NATIONS = ["USA", "CAN", "MEX"]
 GROUP_LETTERS = list("ABCDEFGHIJKL")
@@ -66,6 +67,7 @@ EDITOR_KIND_CONFIG = {
     "goalEvents": EDITABLE_GOAL_EVENTS_STORE,
     "matchPlayerStats": EDITABLE_MATCH_PLAYER_STATS_STORE,
     "scoringRules": SCORING_RULES_STORE,
+    "deadlineOverrides": DEADLINE_OVERRIDES_STORE,
 }
 
 
@@ -88,6 +90,10 @@ DB_READY = False
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def now_local():
+    return datetime.now(LOCAL_TZ)
 
 
 def json_response(handler, payload, status=HTTPStatus.OK):
@@ -366,6 +372,11 @@ def current_scoring_rules():
     rules["clean_sheet_points"] = clean_sheet_points
     rules["league_awards"] = league_awards
     return rules
+
+
+def current_deadline_overrides():
+    stored = load_store(DEADLINE_OVERRIDES_STORE, {})
+    return stored if isinstance(stored, dict) else {}
 
 
 def get_nations():
@@ -875,6 +886,20 @@ def api_sports_get(path, params=None, timeout=15, priority="normal"):
         return 499, payload, None
 
 
+def api_error_message(payload, fallback):
+    errors = (payload or {}).get("errors")
+    if isinstance(errors, dict):
+        parts = [str(value).strip() for value in errors.values() if str(value).strip()]
+        if parts:
+            return " ".join(parts)
+    if isinstance(errors, list):
+        parts = [str(value).strip() for value in errors if str(value).strip()]
+        if parts:
+            return " ".join(parts)
+    message = (payload or {}).get("message")
+    return str(message or fallback)
+
+
 def get_provider_status():
     def enrich_provider_payload(payload):
         enriched = dict(payload or {})
@@ -933,6 +958,282 @@ def get_provider_status():
             }
         ),
     ))
+
+
+def api_position_to_local(value):
+    mapping = {
+        "goalkeeper": "GK",
+        "defender": "DEF",
+        "midfielder": "MID",
+        "attacker": "FWD",
+        "forward": "FWD",
+    }
+    return mapping.get(str(value or "").strip().lower(), "MID")
+
+
+def default_price_for_position(position):
+    return {"GK": 5.5, "DEF": 6.0, "MID": 7.5, "FWD": 8.5}.get(position, 6.5)
+
+
+def normalized_text(value):
+    return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
+
+
+def nation_alias_map():
+    mapping = {}
+    for nation in get_nations():
+        code = nation.get("code")
+        if not code:
+            continue
+        for label in [nation.get("name"), nation.get("code")]:
+            key = normalized_text(label)
+            if key:
+                mapping[key] = code
+    mapping.update({
+        "southkorea": "KOR",
+        "korearepublic": "KOR",
+        "republicofkorea": "KOR",
+        "bosniaherzegovina": "BOS",
+        "bosniaandherzegovina": "BOS",
+        "czechrepublic": "CZE",
+        "usa": "USA",
+        "unitedstates": "USA",
+        "unitedstatesofamerica": "USA",
+        "ivorycoast": "CIV",
+        "capeverde": "CPV",
+        "saudiarabia": "KSA",
+        "drcongo": "COD",
+        "democraticrepublicofthecongo": "COD",
+    })
+    return mapping
+
+
+def resolve_nation_code(api_team=None, fallback_text=""):
+    aliases = nation_alias_map()
+    team = api_team or {}
+    candidates = [
+        team.get("code"),
+        team.get("name"),
+        team.get("country"),
+        fallback_text,
+    ]
+    for value in candidates:
+        key = normalized_text(value)
+        if key in aliases:
+            return aliases[key]
+    return None
+
+
+def fetch_api_team(team_query):
+    query = str(team_query or "").strip()
+    if not query:
+        return None, "Team query is required."
+    params = {"id": int(query)} if query.isdigit() else {"search": query}
+    status, payload, _ = api_sports_get("/teams", params=params, priority="critical")
+    if status != 200:
+        return None, api_error_message(payload, "API team lookup failed.")
+    response = payload.get("response") or []
+    if not response:
+        return None, "No team was found in API-Football."
+    normalized_query = normalized_text(query)
+    national_only = [item for item in response if (item.get("team") or {}).get("national")]
+    pool = national_only or response
+    exact = next((
+        item for item in pool
+        if normalized_text((item.get("team") or {}).get("code")) == normalized_query
+        or normalized_text((item.get("team") or {}).get("name")) == normalized_query
+        or normalized_text((item.get("team") or {}).get("country")) == normalized_query
+    ), None)
+    return (exact or pool[0]), None
+
+
+def import_api_squad(team_query):
+    team_result, error = fetch_api_team(team_query)
+    if error:
+        return None, error
+    team = team_result.get("team") or {}
+    nation_code = resolve_nation_code(team)
+    if not nation_code:
+        return None, f"Could not map API team {team.get('name') or team_query} to a WC26 nation."
+    status, payload, _ = api_sports_get("/players/squads", params={"team": team.get("id")}, priority="critical")
+    if status != 200:
+        return None, api_error_message(payload, "API squad import failed.")
+    response = payload.get("response") or []
+    squad = response[0] if response else None
+    if not squad:
+        return None, f"No squad data returned for {team.get('name') or nation_code}."
+    existing_rows = get_players()
+    by_api_id = {str(row.get("api_player_id")): row for row in existing_rows if row.get("api_player_id")}
+    by_name = {
+        (normalized_text(row.get("name")), row.get("nation_code")): row
+        for row in existing_rows
+        if row.get("name") and row.get("nation_code")
+    }
+    retained = [row for row in existing_rows if row.get("nation_code") != nation_code]
+    imported = []
+    for player in squad.get("players") or []:
+        api_id = str(player.get("id") or "")
+        position = api_position_to_local(player.get("position"))
+        previous = by_api_id.get(api_id) or by_name.get((normalized_text(player.get("name")), nation_code)) or {}
+        base_price = float(previous.get("base_price_millions") or previous.get("price_millions") or default_price_for_position(position))
+        imported.append({
+            "id": previous.get("id") or uuid.uuid4().hex,
+            "api_player_id": int(player.get("id")) if player.get("id") is not None else None,
+            "name": player.get("name") or previous.get("name") or "",
+            "first_name": previous.get("first_name") or "",
+            "last_name": previous.get("last_name") or "",
+            "club": previous.get("club") or team.get("name") or nation_code,
+            "injured": bool(previous.get("injured", False)),
+            "position": position,
+            "suspended": bool(previous.get("suspended", False)),
+            "withdrawn": False,
+            "nation_code": nation_code,
+            "price_drift": float(previous.get("price_drift") or 0),
+            "recent_form": float(previous.get("recent_form") or 0),
+            "star_rating": int(previous.get("star_rating") or 0),
+            "shirt_number": player.get("number"),
+            "withdrawn_at": None,
+            "price_millions": float(previous.get("price_millions") or base_price),
+            "price_override": previous.get("price_override"),
+            "club_country_code": previous.get("club_country_code") or nation_code,
+            "base_price_millions": float(base_price),
+            "international_goals": int(previous.get("international_goals") or 0),
+            "total_fantasy_points": int(previous.get("total_fantasy_points") or 0),
+            "caps": int(previous.get("caps") or 0),
+            "photo_url": player.get("photo"),
+            "api_team_id": team.get("id"),
+            "api_team_name": team.get("name"),
+            "updated_from_api_at": now_iso(),
+            "suspension_games_remaining": int(previous.get("suspension_games_remaining") or 0),
+        })
+    save_editor_payload("players", retained + imported)
+    return {
+        "kind": "players",
+        "team_id": team.get("id"),
+        "team_name": team.get("name"),
+        "nation_code": nation_code,
+        "imported": len(imported),
+        "message": f"Imported {len(imported)} squad players for {team.get('name')} from API-Football.",
+    }, None
+
+
+def import_api_manager(team_query):
+    team_result, error = fetch_api_team(team_query)
+    if error:
+        return None, error
+    team = team_result.get("team") or {}
+    nation_code = resolve_nation_code(team)
+    if not nation_code:
+        return None, f"Could not map API team {team.get('name') or team_query} to a WC26 nation."
+    status, payload, _ = api_sports_get("/coachs", params={"team": team.get("id")}, priority="critical")
+    if status != 200:
+        return None, api_error_message(payload, "API manager import failed.")
+    response = payload.get("response") or []
+    coach = next((item for item in response if (item.get("team") or {}).get("id") == team.get("id")), response[0] if response else None)
+    if not coach:
+        return None, f"No coach data returned for {team.get('name')}."
+    existing_rows = get_managers()
+    previous = next((row for row in existing_rows if row.get("nation_code") == nation_code), {})
+    retained = [row for row in existing_rows if row.get("nation_code") != nation_code]
+    manager = {
+        "id": previous.get("id") or uuid.uuid4().hex,
+        "api_coach_id": coach.get("id"),
+        "api_team_id": team.get("id"),
+        "nation_code": nation_code,
+        "name": coach.get("name") or previous.get("name") or "",
+        "nationality_code": resolve_nation_code(fallback_text=coach.get("nationality")) or previous.get("nationality_code") or "",
+        "price_millions": float(previous.get("price_millions") or 5.0),
+        "updated_from_api_at": now_iso(),
+    }
+    save_editor_payload("managers", retained + [manager])
+    return {
+        "kind": "managers",
+        "team_id": team.get("id"),
+        "team_name": team.get("name"),
+        "nation_code": nation_code,
+        "imported": 1,
+        "message": f"Imported manager for {team.get('name')} from API-Football.",
+    }, None
+
+
+def parse_fixture_stage(round_name):
+    label = str(round_name or "").lower()
+    if "group" in label:
+        return "group"
+    if "round of 32" in label:
+        return "r32"
+    if "round of 16" in label:
+        return "r16"
+    if "quarter" in label:
+        return "qf"
+    if "semi" in label:
+        return "sf"
+    if "3rd" in label or "third" in label:
+        return "third"
+    if "final" in label:
+        return "final"
+    return "group"
+
+
+def parse_group_letter(round_name):
+    text = str(round_name or "")
+    for marker in ["Group - ", "Group "]:
+        if marker in text:
+            tail = text.split(marker, 1)[1].strip()
+            return tail[:1].upper()
+    return None
+
+
+def import_api_fixtures(league, season):
+    params = {"league": int(league), "season": int(season)}
+    status, payload, _ = api_sports_get("/fixtures", params=params, priority="critical")
+    if status != 200:
+        return None, api_error_message(payload, "API fixtures import failed.")
+    response = payload.get("response") or []
+    if not response:
+        return None, api_error_message(payload, "No fixtures were returned by API-Football.")
+    existing = get_fixtures()
+    by_api_id = {str(row.get("api_fixture_id")): row for row in existing if row.get("api_fixture_id")}
+    fixtures = []
+    for item in response:
+        fixture = item.get("fixture") or {}
+        teams = item.get("teams") or {}
+        league_info = item.get("league") or {}
+        venue = fixture.get("venue") or {}
+        home = teams.get("home") or {}
+        away = teams.get("away") or {}
+        home_code = resolve_nation_code(home, home.get("name"))
+        away_code = resolve_nation_code(away, away.get("name"))
+        previous = by_api_id.get(str(fixture.get("id"))) or {}
+        if not home_code or not away_code:
+            continue
+        fixtures.append({
+            "id": previous.get("id") or uuid.uuid4().hex,
+            "api_fixture_id": fixture.get("id"),
+            "city": venue.get("city") or previous.get("city"),
+            "stage": parse_fixture_stage(league_info.get("round")),
+            "venue": venue.get("name") or previous.get("venue"),
+            "finished": str((fixture.get("status") or {}).get("short") or "").upper() in {"FT", "AET", "PEN"},
+            "away_score": (item.get("goals") or {}).get("away"),
+            "home_score": (item.get("goals") or {}).get("home"),
+            "kickoff_at": fixture.get("date"),
+            "report_url": previous.get("report_url"),
+            "bracket_slot": previous.get("bracket_slot"),
+            "group_letter": parse_group_letter(league_info.get("round")) or previous.get("group_letter"),
+            "away_nation_code": away_code,
+            "home_nation_code": home_code,
+            "updated_from_api_at": now_iso(),
+        })
+    if not fixtures:
+        return None, "API fixtures returned no rows that could be mapped to WC26 nations."
+    save_editor_payload("fixtures", fixtures)
+    return {
+        "kind": "fixtures",
+        "league": int(league),
+        "season": int(season),
+        "imported": len(fixtures),
+        "message": f"Imported {len(fixtures)} fixtures from API-Football.",
+    }, None
 
 
 def stat_number(row, *names):
@@ -1136,6 +1437,50 @@ def team_default():
     }
 
 
+def team_record_default():
+    return {
+        "current": team_default(),
+        "locked_by_day": {},
+        "updated_at": None,
+    }
+
+
+def clone_json(value):
+    return json.loads(json.dumps(value))
+
+
+def normalize_team_record(record):
+    base = team_record_default()
+    if isinstance(record, dict) and "current" in record:
+        current = dict(team_default())
+        current.update(record.get("current") or {})
+        locked = {}
+        for day, team in (record.get("locked_by_day") or {}).items():
+            merged = dict(team_default())
+            if isinstance(team, dict):
+                merged.update(team)
+            locked[str(day)] = merged
+        base["current"] = current
+        base["locked_by_day"] = locked
+        base["updated_at"] = record.get("updated_at")
+        return base
+
+    current = dict(team_default())
+    if isinstance(record, dict):
+        current.update(record)
+    base["current"] = current
+    return base
+
+
+def load_team_records():
+    raw = load_store(FANTASY_STORE, {})
+    return {user_id: normalize_team_record(record) for user_id, record in raw.items()}
+
+
+def save_team_records(records):
+    save_store(FANTASY_STORE, records)
+
+
 def compute_team_metrics(team):
     players = player_map()
     managers = manager_map()
@@ -1218,11 +1563,17 @@ def validate_team_payload(payload):
 
 
 def save_fantasy_team(user_id, payload):
+    lock = fantasy_lock_status()
+    editing_day = lock.get("editing_matchday")
+    if not editing_day:
+        return None, "There is no upcoming matchday available for squad edits right now."
+
     valid, error = validate_team_payload(payload)
     if not valid:
         return None, error
 
-    teams = load_store(FANTASY_STORE, {})
+    teams = ensure_live_matchday_snapshots()
+    entry = normalize_team_record(teams.get(user_id))
     team = {
         "team_name": (payload.get("team_name") or "").strip()[:32],
         "player_ids": list(payload.get("player_ids") or []),
@@ -1234,15 +1585,18 @@ def save_fantasy_team(user_id, payload):
         "saved_at": now_iso(),
     }
     team.update(compute_team_metrics(team))
-    teams[user_id] = team
-    save_store(FANTASY_STORE, teams)
+    entry["current"] = team
+    entry["updated_at"] = now_iso()
+    teams[user_id] = entry
+    save_team_records(teams)
 
     profile = update_profile(user_id, {"fantasy_points": team["projected_points"]})
+    target_index = lock.get("editing_matchday_index")
     push_notification(
         user_id,
         "fantasy",
         "Fantasy XI saved",
-        f"{team['team_name'] or 'Your squad'} is locked in at {team['projected_points']} points.",
+        f"{team['team_name'] or 'Your squad'} is saved for Matchday {target_index or 'next'} at {team['projected_points']} projected points.",
     )
     return {"team": team, "profile": profile}, None
 
@@ -1254,6 +1608,130 @@ def fixture_day_key(value):
         return iso_to_datetime(value).astimezone(LOCAL_TZ).date().isoformat()
     except Exception:
         return str(value)[:10] or None
+
+
+def fixture_day_keys():
+    days = {fixture_day_key(fixture.get("kickoff_at")) for fixture in get_fixtures()}
+    return sorted(day for day in days if day)
+
+
+def local_midnight_for_day_key(day_key):
+    day = datetime.strptime(day_key, "%Y-%m-%d").date()
+    return datetime(day.year, day.month, day.day, tzinfo=LOCAL_TZ)
+
+
+def format_day_key_long(day_key):
+    day = datetime.strptime(day_key, "%Y-%m-%d").date()
+    return f"{day.strftime('%B')} {day.day}, {day.year}"
+
+
+def parse_deadline_datetime(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(LOCAL_TZ)
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=LOCAL_TZ)
+    return parsed.astimezone(LOCAL_TZ)
+
+
+def deadline_override_for_day(day_key):
+    raw = current_deadline_overrides().get(day_key)
+    if isinstance(raw, dict):
+        raw = raw.get("deadline_at") or raw.get("deadlineAt") or raw.get("value")
+    return parse_deadline_datetime(raw)
+
+
+def deadline_for_day_key(day_key):
+    return deadline_override_for_day(day_key) or local_midnight_for_day_key(day_key)
+
+
+def fantasy_lock_status():
+    days = fixture_day_keys()
+    now = now_local()
+    live_day = None
+    editing_day = None
+    current_day = None
+
+    for day in days:
+        deadline_at = deadline_for_day_key(day)
+        end_of_day = local_midnight_for_day_key(day) + timedelta(days=1)
+        if deadline_at <= now < end_of_day:
+            live_day = day
+            current_day = day
+            break
+        if now < deadline_at and editing_day is None:
+            editing_day = day
+            current_day = day
+            break
+
+    if current_day is None and days:
+        current_day = days[-1]
+
+    current_index = days.index(current_day) + 1 if current_day in days else None
+    next_day = next((day for day in days if current_day and day > current_day), None) if live_day else None
+    next_index = days.index(next_day) + 1 if next_day in days else None
+    editing_day = next_day if live_day else editing_day
+    editing_index = days.index(editing_day) + 1 if editing_day in days else None
+
+    lock_starts_at = deadline_for_day_key(live_day).astimezone(timezone.utc).isoformat() if live_day else None
+    lock_ends_at = (
+        (local_midnight_for_day_key(live_day) + timedelta(days=1)).astimezone(timezone.utc).isoformat()
+        if live_day
+        else None
+    )
+    next_deadline_at = deadline_for_day_key(editing_day).astimezone(timezone.utc).isoformat() if editing_day else None
+
+    return {
+        "timezone": DEFAULT_TIME_ZONE,
+        "deadline_time_ist": "00:00",
+        "is_locked": bool(live_day),
+        "active_matchday": live_day,
+        "current_matchday": current_day,
+        "current_matchday_index": current_index,
+        "next_matchday": next_day,
+        "next_matchday_index": next_index,
+        "editing_matchday": editing_day,
+        "editing_matchday_index": editing_index,
+        "lock_starts_at": lock_starts_at,
+        "lock_ends_at": lock_ends_at,
+        "next_deadline_at": next_deadline_at,
+    }
+
+
+def ensure_live_matchday_snapshots(records=None):
+    lock = fantasy_lock_status()
+    live_day = lock.get("active_matchday")
+    if not live_day:
+        return load_team_records() if records is None else records
+
+    records = records or load_team_records()
+    changed = False
+    for user_id, record in records.items():
+        locked = record.setdefault("locked_by_day", {})
+        if live_day in locked:
+            continue
+        current = normalize_team_record(record).get("current", team_default())
+        if not current.get("player_ids"):
+            continue
+        snapshot = clone_json(current)
+        snapshot["locked_for_day"] = live_day
+        snapshot["locked_at"] = lock.get("lock_starts_at") or now_iso()
+        locked[live_day] = snapshot
+        record["updated_at"] = now_iso()
+        changed = True
+    if changed:
+        save_team_records(records)
+    return records
 
 
 def row_fixture_id(row):
@@ -1331,17 +1809,21 @@ def team_points_for_day(team, day, points_by_day=None, played_by_day=None):
 
 def build_league_daily_scores(league):
     profiles = load_store(PROFILE_STORE, {})
-    teams = load_store(FANTASY_STORE, {})
+    teams = ensure_live_matchday_snapshots()
     dates = sorted(set(fixture_day_index().values()))
     points_by_day, played_by_day = player_points_by_day()
+    rules = current_scoring_rules().get("league_awards") or {}
+    first_award = int(rules.get("first", 3) or 0)
+    second_award = int(rules.get("second", 1) or 0)
     awards = {member_id: 0 for member_id in league.get("member_ids", [])}
     breakdown = []
 
     for day in dates:
         results = []
         for member_id in league.get("member_ids", []):
-            team = teams.get(member_id)
-            if not team:
+            record = normalize_team_record(teams.get(member_id))
+            team = (record.get("locked_by_day") or {}).get(day) or record.get("current")
+            if not team or not team.get("player_ids"):
                 continue
             score = team_points_for_day(team, day, points_by_day, played_by_day)
             results.append(
@@ -1355,9 +1837,9 @@ def build_league_daily_scores(league):
         results.sort(key=lambda item: (-item["score"], item["display_name"].lower(), item["user_id"]))
         if not results or results[0]["score"] <= 0:
             continue
-        awards[results[0]["user_id"]] = awards.get(results[0]["user_id"], 0) + 3
-        if len(results) > 1 and results[1]["score"] > 0:
-            awards[results[1]["user_id"]] = awards.get(results[1]["user_id"], 0) + 1
+        awards[results[0]["user_id"]] = awards.get(results[0]["user_id"], 0) + first_award
+        if len(results) > 1 and results[1]["score"] > 0 and second_award:
+            awards[results[1]["user_id"]] = awards.get(results[1]["user_id"], 0) + second_award
         breakdown.append(
             {
                 "date": day,
@@ -1395,16 +1877,18 @@ def recompute_all_league_daily_scores():
 
 
 def refresh_all_fantasy_state():
-    teams = load_store(FANTASY_STORE, {})
+    teams = ensure_live_matchday_snapshots()
     profiles = load_store(PROFILE_STORE, {})
-    for user_id, team in teams.items():
-        refreshed = dict(team)
-        refreshed.update(compute_team_metrics(team))
-        teams[user_id] = refreshed
+    for user_id, record in teams.items():
+        entry = normalize_team_record(record)
+        refreshed = dict(entry["current"])
+        refreshed.update(compute_team_metrics(entry["current"]))
+        entry["current"] = refreshed
+        teams[user_id] = entry
         if user_id in profiles:
             profiles[user_id]["fantasy_points"] = refreshed.get("projected_points", 0)
             profiles[user_id]["updated_at"] = now_iso()
-    save_store(FANTASY_STORE, teams)
+    save_team_records(teams)
     save_store(PROFILE_STORE, profiles)
     return {
         "teams": len(teams),
@@ -1414,8 +1898,9 @@ def refresh_all_fantasy_state():
 
 
 def get_fantasy_team(user_id):
-    teams = load_store(FANTASY_STORE, {})
-    return teams.get(user_id, team_default())
+    teams = ensure_live_matchday_snapshots()
+    entry = normalize_team_record(teams.get(user_id))
+    return entry.get("current", team_default())
 
 
 def league_default(name, owner_id):
@@ -1449,7 +1934,8 @@ def rank_for_user(user_id):
 def build_league_payload_for_user(user_id):
     leagues = load_store(LEAGUE_STORE, [])
     profiles = load_store(PROFILE_STORE, {})
-    teams = load_store(FANTASY_STORE, {})
+    teams = ensure_live_matchday_snapshots()
+    award_rules = current_scoring_rules().get("league_awards") or {"first": 3, "second": 1, "rest": 0}
     result = []
     for league in leagues:
         if user_id not in league.get("member_ids", []):
@@ -1459,7 +1945,7 @@ def build_league_payload_for_user(user_id):
         enriched_members = []
         for member in members:
             member_id = member["id"]
-            team = teams.get(member_id, team_default())
+            team = normalize_team_record(teams.get(member_id)).get("current", team_default())
             league_points = int(awards.get(member_id, 0))
             enriched_members.append(
                 {
@@ -1493,7 +1979,11 @@ def build_league_payload_for_user(user_id):
                 "position": position,
                 "scoring": {
                     "type": "daily",
-                    "awards": {"first": 3, "second": 1, "rest": 0},
+                    "awards": {
+                        "first": int(award_rules.get("first", 3) or 0),
+                        "second": int(award_rules.get("second", 1) or 0),
+                        "rest": int(award_rules.get("rest", 0) or 0),
+                    },
                     "timezone": DEFAULT_TIME_ZONE,
                     "breakdown": breakdown[:30],
                 },
@@ -1613,9 +2103,9 @@ def delete_local_account_data(user_id):
     profiles.pop(user_id, None)
     save_store(PROFILE_STORE, profiles)
 
-    teams = load_store(FANTASY_STORE, {})
+    teams = load_team_records()
     teams.pop(user_id, None)
-    save_store(FANTASY_STORE, teams)
+    save_team_records(teams)
 
     notifications = load_store(NOTIFICATION_STORE, {})
     notifications.pop(user_id, None)
@@ -1806,6 +2296,7 @@ def editor_reference_payload(kind):
         "goalEvents": get_match_goal_events_reference,
         "matchPlayerStats": get_match_player_stats_reference,
         "scoringRules": scoring_rules_default,
+        "deadlineOverrides": lambda: {},
     }
     supplier = suppliers.get(kind)
     return supplier() if supplier else None
@@ -1819,6 +2310,7 @@ def editor_current_payload(kind):
         "goalEvents": get_match_goal_events,
         "matchPlayerStats": get_match_player_stats,
         "scoringRules": current_scoring_rules,
+        "deadlineOverrides": current_deadline_overrides,
     }
     supplier = suppliers.get(kind)
     return supplier() if supplier else None
@@ -1832,6 +2324,7 @@ def editor_source_flags():
         "goalEvents": "local" if store_has_local_rows(EDITABLE_GOAL_EVENTS_STORE) else "reference",
         "matchPlayerStats": "local" if store_has_local_rows(EDITABLE_MATCH_PLAYER_STATS_STORE) else "reference",
         "scoringRules": "local" if load_store(SCORING_RULES_STORE, {}) else "default",
+        "deadlineOverrides": "local" if load_store(DEADLINE_OVERRIDES_STORE, {}) else "default",
     }
 
 
@@ -1862,6 +2355,29 @@ def validate_editor_payload(kind, payload):
                     return None, f"{key} must be an object."
                 merged[key].update(payload[key])
         return merged, None
+
+    if kind == "deadlineOverrides":
+        if not isinstance(payload, dict):
+            return None, "Deadline overrides must be a JSON object keyed by IST matchday date."
+        normalized = {}
+        for day_key, value in payload.items():
+            try:
+                datetime.strptime(str(day_key), "%Y-%m-%d")
+            except ValueError:
+                return None, f"Deadline key {day_key!r} must use YYYY-MM-DD."
+            if value in (None, "", {}):
+                continue
+            if isinstance(value, dict):
+                deadline_value = value.get("deadline_at") or value.get("deadlineAt") or value.get("value")
+                note = str(value.get("note") or "").strip()
+            else:
+                deadline_value = value
+                note = ""
+            parsed = parse_deadline_datetime(deadline_value)
+            if not parsed:
+                return None, f"Deadline override for {day_key} must be an ISO datetime."
+            normalized[str(day_key)] = {"deadline_at": parsed.isoformat(), "note": note}
+        return normalized, None
 
     if not isinstance(payload, list):
         return None, f"{kind} must be a JSON array."
@@ -1947,6 +2463,7 @@ def admin_dashboard_payload():
             "goalEvents": get_match_goal_events(),
             "matchPlayerStats": get_match_player_stats(),
             "scoringRules": current_scoring_rules(),
+            "deadlineOverrides": current_deadline_overrides(),
         },
     }
 
@@ -1960,6 +2477,8 @@ def public_bootstrap_payload():
             "nations": get_nations(),
             "comingUp": next_coming_up(),
             "standings": standings,
+            "deadlineOverrides": current_deadline_overrides(),
+            "lockStatus": fantasy_lock_status(),
         }
 
     return with_cache("bootstrap_public", 60, producer, {
@@ -1967,6 +2486,8 @@ def public_bootstrap_payload():
         "nations": [],
         "comingUp": {"day": None, "fixtures": []},
         "standings": {"groups": {}, "thirds": [], "bracket": {}, "fixtures": [], "playerStats": {}, "goalEvents": []},
+        "deadlineOverrides": {},
+        "lockStatus": {"timezone": DEFAULT_TIME_ZONE, "deadline_time_ist": "00:00", "is_locked": False, "active_matchday": None, "current_matchday": None, "current_matchday_index": None, "next_matchday": None, "next_matchday_index": None, "editing_matchday": None, "editing_matchday_index": None, "lock_starts_at": None, "lock_ends_at": None, "next_deadline_at": None},
     })
 
 
@@ -2150,6 +2671,24 @@ class WC26Handler(SimpleHTTPRequestHandler):
                 return error_response(self, error)
             response = admin_dashboard_payload()
             response["editorAction"] = result
+            return json_response(self, response)
+
+        if path == "/api/admin/import/api":
+            if not admin_auth_required(self):
+                return
+            kind = (payload.get("kind") or "").strip()
+            if kind == "fixtures":
+                result, error = import_api_fixtures(payload.get("league") or 1, payload.get("season") or 2026)
+            elif kind == "players":
+                result, error = import_api_squad(payload.get("team_query"))
+            elif kind == "managers":
+                result, error = import_api_manager(payload.get("team_query"))
+            else:
+                result, error = None, "Unknown API import kind."
+            if error:
+                return error_response(self, error)
+            response = admin_dashboard_payload()
+            response["apiImport"] = result
             return json_response(self, response)
 
         if path == "/api/auth/signin":

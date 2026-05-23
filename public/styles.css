@@ -2,8 +2,8 @@
   --bg: #080b18;
   --bg-2: #101634;
   --bg-3: #26133d;
-  --card: rgba(13, 19, 39, 0.82);
-  --card-strong: rgba(15, 21, 45, 0.96);
+  --card: rgba(11, 16, 32, 0.96);
+  --card-strong: rgba(14, 20, 38, 0.99);
   --line: rgba(220, 238, 255, 0.14);
   --line-strong: rgba(220, 238, 255, 0.26);
   --text: #f7fbff;
@@ -13,9 +13,9 @@
   --lime: #8dff75;
   --gold: #ffd166;
   --danger: #ff6b8f;
-  --shadow: 0 28px 80px -34px rgba(0, 0, 0, 0.82);
-  --glow-cyan: 0 0 28px rgba(32, 231, 255, 0.22);
-  --glow-magenta: 0 0 28px rgba(255, 78, 205, 0.22);
+  --shadow: 0 20px 40px -28px rgba(0, 0, 0, 0.9);
+  --glow-cyan: 0 0 18px rgba(32, 231, 255, 0.18);
+  --glow-magenta: 0 0 18px rgba(255, 78, 205, 0.18);
   --safe-bottom: calc(env(safe-area-inset-bottom) + 86px);
   color-scheme: dark;
 }
@@ -36,22 +36,9 @@ body {
   font-family: Inter, "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   -webkit-font-smoothing: antialiased;
   background:
-    radial-gradient(ellipse at 12% 0%, rgba(32, 231, 255, 0.18), transparent 32%),
-    radial-gradient(ellipse at 88% 8%, rgba(255, 78, 205, 0.15), transparent 34%),
-    radial-gradient(ellipse at 50% 110%, rgba(141, 255, 117, 0.1), transparent 42%),
-    linear-gradient(165deg, #060815 0%, #0d1430 38%, #21113a 72%, #070914 100%);
-}
-
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  opacity: 0.5;
-  background:
-    linear-gradient(120deg, transparent 0 32%, rgba(255, 255, 255, 0.035) 32% 33%, transparent 33% 66%, rgba(255, 255, 255, 0.025) 66% 67%, transparent 67%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 38%, rgba(0, 0, 0, 0.32));
-  mix-blend-mode: screen;
+    radial-gradient(circle at top left, rgba(32, 231, 255, 0.12), transparent 24%),
+    radial-gradient(circle at top right, rgba(255, 78, 205, 0.12), transparent 28%),
+    linear-gradient(180deg, #060815 0%, #0c1430 42%, #120d26 100%);
 }
 
 button,
@@ -89,18 +76,18 @@ svg {
   position: relative;
   min-height: 100vh;
   overflow-x: hidden;
+  isolation: isolate;
 }
 
 .ambient {
-  position: fixed;
+  position: absolute;
   inset: 0;
   pointer-events: none;
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(32, 231, 255, 0.05) 1px, transparent 1px),
-    linear-gradient(135deg, rgba(255, 78, 205, 0.045) 1px, transparent 1px);
-  background-size: 36px 36px, 36px 36px, 140px 140px;
-  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.9), transparent 92%);
+  opacity: 0.72;
+  background:
+    radial-gradient(circle at 12% 8%, rgba(32, 231, 255, 0.08), transparent 20%),
+    radial-gradient(circle at 86% 12%, rgba(255, 78, 205, 0.08), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 32%);
 }
 
 .page {
@@ -123,11 +110,7 @@ svg {
 .nav-shell,
 .modal-card {
   border: 1px solid var(--line);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.018)),
-    var(--card);
-  -webkit-backdrop-filter: blur(22px) saturate(130%);
-  backdrop-filter: blur(22px) saturate(130%);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01)), var(--card);
   box-shadow: var(--shadow);
 }
 
@@ -553,32 +536,41 @@ svg {
 }
 
 .hero-glow.a {
-  background: radial-gradient(circle, rgba(176, 71, 54, 0.12), transparent 62%);
+  background: radial-gradient(circle, rgba(255, 78, 205, 0.18), transparent 64%);
 }
 
 .hero-glow.b {
   inset: -4%;
-  background: radial-gradient(circle, rgba(15, 109, 127, 0.12), transparent 56%);
+  background: radial-gradient(circle, rgba(32, 231, 255, 0.16), transparent 58%);
 }
 
 .ring-track {
   position: absolute;
   inset: 0;
-  animation: ring-spin 60s linear infinite;
 }
 
-.ring-flag {
+.ring-node {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 28px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
   transform-origin: center;
+  border: 1px solid rgba(220, 238, 255, 0.18);
+  box-shadow: 0 0 0 5px rgba(255, 255, 255, 0.015);
 }
 
-.ring-flag img {
-  width: 100%;
-  height: auto;
-  filter: drop-shadow(0 3px 8px rgba(16, 24, 40, 0.18));
+.ring-node.cyan {
+  background: linear-gradient(135deg, rgba(32, 231, 255, 0.95), rgba(95, 161, 255, 0.9));
+}
+
+.ring-node.magenta {
+  background: linear-gradient(135deg, rgba(255, 78, 205, 0.95), rgba(139, 92, 246, 0.88));
+}
+
+.ring-node.gold {
+  background: linear-gradient(135deg, rgba(255, 209, 102, 0.96), rgba(141, 255, 117, 0.88));
 }
 
 .ring-core {
@@ -590,11 +582,11 @@ svg {
   justify-content: center;
   text-align: center;
   border-radius: 999px;
-  border: 1px solid rgba(16, 24, 40, 0.12);
+  border: 1px solid rgba(220, 238, 255, 0.12);
   background:
-    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.88), transparent 38%),
-    rgba(255, 255, 255, 0.78);
-  box-shadow: inset 0 0 38px rgba(15, 109, 127, 0.06), 0 0 42px rgba(16, 24, 40, 0.08);
+    radial-gradient(circle at 50% 0%, rgba(32, 231, 255, 0.14), transparent 40%),
+    linear-gradient(180deg, rgba(18, 27, 52, 0.98), rgba(8, 12, 25, 0.98));
+  box-shadow: inset 0 0 28px rgba(32, 231, 255, 0.08), 0 24px 48px -36px rgba(0, 0, 0, 0.88);
 }
 
 .ring-core .title {
@@ -620,11 +612,11 @@ svg {
 }
 
 .hero-card.lime {
-  box-shadow: 0 0 0 1px rgba(93, 127, 63, 0.18), 0 0 32px -18px rgba(93, 127, 63, 0.2), var(--shadow);
+  box-shadow: 0 0 0 1px rgba(141, 255, 117, 0.16), 0 12px 28px -24px rgba(141, 255, 117, 0.2), var(--shadow);
 }
 
 .hero-card.cyan {
-  box-shadow: 0 0 0 1px rgba(15, 109, 127, 0.18), 0 0 32px -18px rgba(15, 109, 127, 0.2), var(--shadow);
+  box-shadow: 0 0 0 1px rgba(32, 231, 255, 0.16), 0 12px 28px -24px rgba(32, 231, 255, 0.2), var(--shadow);
 }
 
 .hero-card .card-title {
@@ -981,6 +973,52 @@ svg {
     linear-gradient(145deg, rgba(255, 255, 255, 0.86), rgba(255, 255, 255, 0.72)),
     rgba(255, 255, 255, 0.8);
   border: 1px solid rgba(16, 24, 40, 0.1);
+}
+
+.deadline-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+}
+
+.deadline-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.deadline-copy strong {
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.deadline-side {
+  display: grid;
+  gap: 10px;
+  justify-items: end;
+  text-align: right;
+}
+
+.deadline-count strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 26px;
+  color: var(--cyan);
+}
+
+.deadline-card.locked .deadline-count strong {
+  color: var(--gold);
+}
+
+@media (max-width: 720px) {
+  .deadline-card {
+    grid-template-columns: 1fr;
+  }
+
+  .deadline-side {
+    justify-items: start;
+    text-align: left;
+  }
 }
 
 .provider-grid {
@@ -1392,7 +1430,6 @@ svg {
   top: 0;
   z-index: 20;
   border-bottom: 1px solid rgba(16, 24, 40, 0.08);
-  backdrop-filter: blur(18px);
 }
 
 .announcement.info {
@@ -1546,8 +1583,7 @@ svg {
 .modal-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(15, 23, 42, 0.28);
-  backdrop-filter: blur(8px);
+  background: rgba(3, 7, 18, 0.74);
 }
 
 .modal-card {
@@ -1616,9 +1652,7 @@ svg {
 
 .skeleton {
   border-radius: 12px;
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.55), rgba(223, 231, 239, 0.9), rgba(255, 255, 255, 0.55));
-  background-size: 200% 100%;
-  animation: shimmer 1.2s linear infinite;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03));
 }
 
 .skeleton.block {
@@ -1633,17 +1667,13 @@ svg {
   background: radial-gradient(circle, rgba(32, 231, 255, 0.2), transparent 58%);
 }
 
-.ring-flag img {
-  filter: drop-shadow(0 0 10px rgba(32, 231, 255, 0.28));
-}
-
 .ring-core {
   border-color: rgba(32, 231, 255, 0.22);
   background:
     radial-gradient(circle at 50% 0%, rgba(32, 231, 255, 0.18), transparent 38%),
     radial-gradient(circle at 50% 100%, rgba(255, 78, 205, 0.16), transparent 36%),
     rgba(8, 13, 31, 0.86);
-  box-shadow: inset 0 0 42px rgba(32, 231, 255, 0.08), 0 0 52px rgba(255, 78, 205, 0.14);
+  box-shadow: inset 0 0 28px rgba(32, 231, 255, 0.08), 0 24px 48px -36px rgba(0, 0, 0, 0.88);
 }
 
 .feature-copy,
@@ -1748,6 +1778,14 @@ svg {
 .role-chip.active {
   color: #07101d;
   background: linear-gradient(135deg, var(--lime), var(--cyan));
+}
+
+button:disabled,
+select:disabled,
+input:disabled,
+textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
 }
 
 .player-row.selected {
@@ -1905,16 +1943,6 @@ svg {
 
 .hidden {
   display: none !important;
-}
-
-@keyframes ring-spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-
-@keyframes shimmer {
-  from { background-position: 200% 0; }
-  to { background-position: -200% 0; }
 }
 
 @media (max-width: 920px) {

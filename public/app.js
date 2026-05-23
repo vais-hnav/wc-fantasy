@@ -59,6 +59,8 @@ const state = {
     fixtures: [],
     comingUp: { day: null, fixtures: [] },
     standings: null,
+    deadlineOverrides: {},
+    lockStatus: null,
     players: [],
     managers: [],
     faqs: [],
@@ -106,6 +108,8 @@ const state = {
 const appNode = document.querySelector("#app");
 const overlayNode = document.querySelector("#overlay-root");
 let deferredRenderTimer = null;
+let matchdayTicker = null;
+let lastMatchdaySignature = "";
 
 function $(selector, root = document) {
   return root.querySelector(selector);
@@ -312,6 +316,143 @@ function money(value) {
   return `£${Number(value || 0).toFixed(1)}`;
 }
 
+function istDateKey(value = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz(),
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(value));
+  const map = Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+  return `${map.year}-${map.month}-${map.day}`;
+}
+
+function istMidnight(dayKey) {
+  return dayKey ? new Date(`${dayKey}T00:00:00+05:30`) : null;
+}
+
+function parseDeadlineDate(value) {
+  if (!value) return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+  if (typeof value !== "string") return null;
+  const raw = value.trim();
+  if (!raw) return null;
+  const normalized = /([zZ]|[+-]\d{2}:\d{2})$/.test(raw) ? raw : `${raw}+05:30`;
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function deadlineForDayKey(dayKey) {
+  const raw = state.publicData.deadlineOverrides?.[dayKey];
+  const value = raw && typeof raw === "object" ? (raw.deadline_at || raw.deadlineAt || raw.value) : raw;
+  return parseDeadlineDate(value) || istMidnight(dayKey);
+}
+
+function formatIstDay(dayKey, options = { weekday: "short", day: "numeric", month: "short" }) {
+  const value = istMidnight(dayKey);
+  return value ? formatDate(value, options) : "";
+}
+
+function matchdayStatus() {
+  const dayKeys = [...new Set((state.publicData.fixtures || []).map((fixture) => istDateKey(fixture.kickoff_at)).filter(Boolean))].sort();
+  const now = new Date();
+  let liveMatchday = null;
+  let editingMatchday = null;
+  let currentMatchday = null;
+
+  for (const dayKey of dayKeys) {
+    const deadlineAt = deadlineForDayKey(dayKey);
+    const endOfDay = new Date(istMidnight(dayKey).getTime() + (24 * 60 * 60 * 1000));
+    if (deadlineAt && deadlineAt <= now && now < endOfDay) {
+      liveMatchday = dayKey;
+      currentMatchday = dayKey;
+      break;
+    }
+    if (deadlineAt && now < deadlineAt && !editingMatchday) {
+      editingMatchday = dayKey;
+      currentMatchday = dayKey;
+      break;
+    }
+  }
+
+  if (!currentMatchday && dayKeys.length) currentMatchday = dayKeys[dayKeys.length - 1];
+
+  const currentMatchdayIndex = currentMatchday ? dayKeys.indexOf(currentMatchday) + 1 : null;
+  const nextMatchday = liveMatchday ? (dayKeys.find((dayKey) => dayKey > currentMatchday) || null) : null;
+  const nextMatchdayIndex = nextMatchday ? dayKeys.indexOf(nextMatchday) + 1 : null;
+  if (liveMatchday) editingMatchday = nextMatchday;
+  const editingMatchdayIndex = editingMatchday ? dayKeys.indexOf(editingMatchday) + 1 : null;
+  const lockEndsAt = liveMatchday ? new Date(istMidnight(liveMatchday).getTime() + (24 * 60 * 60 * 1000)) : null;
+  const nextDeadlineAt = editingMatchday ? deadlineForDayKey(editingMatchday) : null;
+  return {
+    timezone: "IST",
+    isLocked: Boolean(liveMatchday),
+    activeMatchday: liveMatchday,
+    currentMatchday,
+    currentMatchdayIndex,
+    nextMatchday,
+    nextMatchdayIndex,
+    editingMatchday,
+    editingMatchdayIndex,
+    lockEndsAt,
+    nextDeadlineAt,
+  };
+}
+
+function fantasyEditsLocked() {
+  return !matchdayStatus().editingMatchday;
+}
+
+function matchdayCountdownTarget(status = matchdayStatus()) {
+  return status.nextDeadlineAt;
+}
+
+function formatCountdown(target) {
+  if (!target) return "No deadline set";
+  const remaining = Math.max(0, target.getTime() - Date.now());
+  const totalSeconds = Math.floor(remaining / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(hours).padStart(2, "0")}h ${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
+}
+
+function matchdayStatusSignature(status = matchdayStatus()) {
+  return JSON.stringify([
+    status.isLocked,
+    status.activeMatchday,
+    status.currentMatchday,
+    status.currentMatchdayIndex,
+    status.nextMatchday,
+    status.nextMatchdayIndex,
+    status.editingMatchday,
+    status.editingMatchdayIndex,
+    status.nextDeadlineAt ? status.nextDeadlineAt.toISOString() : "",
+  ]);
+}
+
+function refreshMatchdayCountdown() {
+  const status = matchdayStatus();
+  document.querySelectorAll("[data-matchday-countdown]").forEach((node) => {
+    node.textContent = formatCountdown(matchdayCountdownTarget(status));
+  });
+  const signature = matchdayStatusSignature(status);
+  if (signature !== lastMatchdaySignature) {
+    lastMatchdaySignature = signature;
+    if (!state.loading) render();
+  }
+}
+
+function startMatchdayTicker() {
+  if (matchdayTicker) return;
+  lastMatchdaySignature = matchdayStatusSignature();
+  matchdayTicker = window.setInterval(refreshMatchdayCountdown, 1000);
+}
+
+function noEditWindowMessage() {
+  return "There is no upcoming matchday open for edits right now.";
+}
+
 function prettyJson(value) {
   return JSON.stringify(value ?? null, null, 2);
 }
@@ -491,12 +632,11 @@ function fixtureCard(fixture, clickable = true, showGroup = false) {
 
 function flagRingHtml() {
   const radius = window.innerWidth >= 640 ? 215 : window.innerWidth <= 430 ? 140 : 160;
-  return RING_CODES.map((code, index) => {
+  return RING_CODES.map((_, index) => {
     const angle = (index / RING_CODES.length) * 360;
+    const tone = ["cyan", "magenta", "gold"][index % 3];
     return `
-      <span class="ring-flag" style="transform: translate(-50%, -50%) rotate(${angle}deg) translateY(-${radius}px) rotate(90deg)">
-        <img src="${flagUrl(code)}" alt="">
-      </span>
+      <span class="ring-node ${tone}" aria-hidden="true" style="transform: translate(-50%, -50%) rotate(${angle}deg) translateY(-${radius}px)"></span>
     `;
   }).join("");
 }
@@ -859,6 +999,7 @@ function leaderboardPage() {
   const board = state.session.leaderboard || { global: [], position: null, leagues: [] };
   const scope = state.ui.activeLeagueId;
   const activeLeague = board.leagues.find((league) => league.id === scope);
+  const awards = activeLeague?.scoring?.awards || { first: 3, second: 1, rest: 0 };
   const rows = scope === "global" ? board.global : (activeLeague?.members || []);
   const scopePosition = scope === "global" ? board.position : activeLeague?.position;
   return appShell(`
@@ -896,7 +1037,7 @@ function leaderboardPage() {
                     <div class="league-name">${escapeHtml(activeLeague.name)}</div>
                     <div class="small-meta">Invite code</div>
                     <div class="invite-code">${escapeHtml(activeLeague.invite_code)}</div>
-                    <div class="small-meta" style="margin-top:8px">Daily scoring: 3 for first, 1 for second, 0 for the rest. Window: IST day.</div>
+                    <div class="small-meta" style="margin-top:8px">Daily scoring: ${awards.first} for first, ${awards.second} for second, ${awards.rest} for the rest. Window: IST day.</div>
                   </div>
                   <div class="chip-row">
                     <button class="ghost-button gold" data-action="copy-code" data-code="${activeLeague.invite_code}">${icon("copy")} Copy</button>
@@ -932,9 +1073,65 @@ function leaderboardRow(row, index) {
   `;
 }
 
+function fantasyDeadlineCard() {
+  const status = matchdayStatus();
+  if (!status.currentMatchday) {
+    return `
+      <section class="surface deadline-card">
+        <div>
+          <div class="small-meta">Daily lock</div>
+          <strong>No matchday deadline is scheduled yet.</strong>
+        </div>
+      </section>
+    `;
+  }
+  if (!status.editingMatchday) {
+    const liveLabel = status.activeMatchday
+      ? `Matchday ${status.currentMatchdayIndex || "—"} · ${formatIstDay(status.activeMatchday, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}`
+      : `Matchday ${status.currentMatchdayIndex || "—"} · ${formatIstDay(status.currentMatchday, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}`;
+    return `
+      <section class="surface deadline-card locked">
+        <div class="deadline-copy">
+          <div class="small-meta">Daily lock · 12:00 AM IST</div>
+          <strong>${escapeHtml(liveLabel)}</strong>
+          <p class="subcopy">The active matchday is live and there is no later matchday open for edits yet.</p>
+        </div>
+        <div class="deadline-side">
+          <span class="status-pill passive">Locked now</span>
+        </div>
+      </section>
+    `;
+  }
+  const editingLabel = `Matchday ${status.editingMatchdayIndex || "—"} · ${formatIstDay(status.editingMatchday, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}`;
+  const helper = status.isLocked
+    ? `Matchday ${status.currentMatchdayIndex || "—"} is locked. You are now editing Matchday ${status.editingMatchdayIndex || "next"}.`
+    : "Deadline is 12:00 AM IST. Matchday scoring runs from 12:00 AM to 11:59 PM IST.";
+  const badge = status.isLocked ? `Matchday ${status.currentMatchdayIndex || "—"} live` : "Open now";
+  const countdownLabel = "Deadline in";
+  return `
+    <section class="surface deadline-card ${status.isLocked ? "locked" : "open"}">
+      <div class="deadline-copy">
+        <div class="small-meta">Daily lock · 12:00 AM IST</div>
+        <strong>${escapeHtml(editingLabel)}</strong>
+        <p class="subcopy">${escapeHtml(helper)}</p>
+      </div>
+      <div class="deadline-side">
+        <span class="status-pill ${status.isLocked ? "passive" : "active"}">${escapeHtml(badge)}</span>
+        <div class="deadline-count">
+          <span class="small-meta">${escapeHtml(countdownLabel)}</span>
+          <strong data-matchday-countdown>${escapeHtml(formatCountdown(matchdayCountdownTarget(status)))}</strong>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function fantasyPage() {
   syncDraftOrdering();
   const draft = state.fantasyDraft;
+  const status = matchdayStatus();
+  const locked = fantasyEditsLocked();
+  const disableAttr = locked ? "disabled" : "";
   const starters = starterIdsFromDraft().map((id) => playerMap()[id]).filter(Boolean);
   const starterGroups = {
     GK: starters.filter((player) => player.position === "GK"),
@@ -949,6 +1146,7 @@ function fantasyPage() {
     <div class="page">
       ${pageHeader("Fantasy XI", "Build the full 15-player squad, set your roles and save into leagues.", "magenta")}
       <div class="stack" style="margin-top:16px">
+        ${fantasyDeadlineCard()}
         <div class="budget-board">
           <div class="metric-card"><span class="metric-label">Budget left</span><strong class="metric-value neon-cyan">${money(BUDGET_CAP - spentBudget())}</strong></div>
           <div class="metric-card"><span class="metric-label">Squad</span><strong class="metric-value neon-lime">${squadCount}/15</strong></div>
@@ -960,7 +1158,7 @@ function fantasyPage() {
           <section class="surface pitch-wrap">
             <div class="field">
               <label for="teamName">Team name</label>
-              <input class="field-input" id="teamName" data-action="team-name" value="${escapeHtml(draft.team_name)}" placeholder="Name your squad">
+              <input class="field-input" id="teamName" data-action="team-name" value="${escapeHtml(draft.team_name)}" placeholder="Name your squad" ${disableAttr}>
             </div>
             <div class="pitch" style="margin-top:14px">
               <div class="half-line"></div>
@@ -997,7 +1195,7 @@ function fantasyPage() {
                 <strong>${escapeHtml(fantasyManager()?.name || "Select a manager")}</strong>
                 <div class="player-sub">${escapeHtml(fantasyManager()?.nation?.name || "")}</div>
               </div>
-              <select class="field-select" data-action="manager-select">
+              <select class="field-select" data-action="manager-select" ${disableAttr}>
                 <option value="">Manager</option>
                 ${state.publicData.managers.map((manager) => `<option value="${manager.id}" ${draft.manager_id === manager.id ? "selected" : ""}>${escapeHtml(`${manager.name} · ${manager.nation?.code || ""} · ${money(manager.price)}`)}</option>`).join("")}
               </select>
@@ -1033,7 +1231,7 @@ function fantasyPage() {
                 <div class="heading"><h2 class="neon-lime">Roles</h2></div>
                 <div class="table-list" style="margin-top:12px">${starterIdsFromDraft().map((id) => roleRow(playerMap()[id])).join("")}</div>
               </div>
-              <button class="button tertiary" data-action="save-team">Save Fantasy XI</button>
+              <button class="button tertiary" data-action="save-team" ${disableAttr}>${locked ? "No upcoming matchday to save" : `Save for Matchday ${status.editingMatchdayIndex || "next"}`}</button>
             </div>
           </section>
         </div>
@@ -1044,6 +1242,7 @@ function fantasyPage() {
 
 function fantasyPlayerRows() {
   const term = state.ui.fantasySearch.trim().toLowerCase();
+  const locked = fantasyEditsLocked();
   return state.publicData.players
     .filter((player) => state.ui.fantasyFilter === "ALL" || player.position === state.ui.fantasyFilter)
     .filter((player) => {
@@ -1053,7 +1252,7 @@ function fantasyPlayerRows() {
     .slice(0, 80)
     .map((player) => {
       const selected = state.fantasyDraft.player_ids.includes(player.id);
-      const disabled = !selected && !canAddPlayer(player);
+      const disabled = locked || (!selected && !canAddPlayer(player));
       return `
         <button class="player-row ${selected ? "selected" : ""}" data-action="toggle-player" data-player="${player.id}" ${disabled ? "disabled" : ""}>
           <span class="position-pill">${escapeHtml(player.position)}</span>
@@ -1078,6 +1277,7 @@ function tileValue(player) {
 
 function roleRow(player) {
   if (!player) return "";
+  const locked = fantasyEditsLocked();
   const isCaptain = state.fantasyDraft.captain_id === player.id;
   const isVice = state.fantasyDraft.vice_captain_id === player.id;
   const isStarter = starterIdsFromDraft().includes(player.id);
@@ -1089,9 +1289,9 @@ function roleRow(player) {
         <div class="player-sub">${escapeHtml(`${player.nation.code} · ${money(player.price)}`)}</div>
       </div>
       <div class="role-row">
-        <button class="role-chip ${isCaptain ? "active" : ""}" data-action="set-captain" data-player="${player.id}">C</button>
-        <button class="role-chip ${isVice ? "active" : ""}" data-action="set-vice" data-player="${player.id}">VC</button>
-        <button class="role-chip ${isStarter ? "active" : ""}" data-action="toggle-starter" data-player="${player.id}">${isStarter ? "XI" : "Bench"}</button>
+        <button class="role-chip ${isCaptain ? "active" : ""}" data-action="set-captain" data-player="${player.id}" ${locked ? "disabled" : ""}>C</button>
+        <button class="role-chip ${isVice ? "active" : ""}" data-action="set-vice" data-player="${player.id}" ${locked ? "disabled" : ""}>VC</button>
+        <button class="role-chip ${isStarter ? "active" : ""}" data-action="toggle-starter" data-player="${player.id}" ${locked ? "disabled" : ""}>${isStarter ? "XI" : "Bench"}</button>
       </div>
     </div>
   `;
@@ -1107,6 +1307,7 @@ function canAddPlayer(player) {
 }
 
 function togglePlayer(playerId) {
+  if (fantasyEditsLocked()) return;
   const ids = [...state.fantasyDraft.player_ids];
   if (ids.includes(playerId)) {
     state.fantasyDraft.player_ids = ids.filter((id) => id !== playerId);
@@ -1125,6 +1326,7 @@ function togglePlayer(playerId) {
 }
 
 function toggleStarter(playerId) {
+  if (fantasyEditsLocked()) return;
   const starters = new Set(starterIdsFromDraft());
   const player = playerMap()[playerId];
   if (!player) return;
@@ -1334,6 +1536,27 @@ function adminDashboardPage() {
         </div>
       </section>
 
+      <section class="surface stack">
+        <div class="heading">
+          <div>
+            <h2 class="neon-magenta">API Imports</h2>
+            <p class="subcopy">Server-side imports from API-Football. Use team imports for official squad announcements to stay inside the free-plan quota.</p>
+          </div>
+        </div>
+        <div class="grid-3">
+          ${adminApiImportForm("Fixtures from API", "fixtures", `
+            <div class="field"><label>League ID</label><input class="field-input" name="league" type="number" value="1" min="1" required></div>
+            <div class="field"><label>Season</label><input class="field-input" name="season" type="number" value="2026" min="2022" required></div>
+          `, "Imports the full fixture list from API-Football. Free plan access to 2026 fixtures may be blocked by the provider.")}
+          ${adminApiImportForm("Team Squad from API", "players", `
+            <div class="field"><label>Team name or API team ID</label><input class="field-input" name="team_query" placeholder="Belgium or 1" required></div>
+          `, "Imports one national-team squad and replaces that nation's current player pool in the local editor.")}
+          ${adminApiImportForm("Manager from API", "managers", `
+            <div class="field"><label>Team name or API team ID</label><input class="field-input" name="team_query" placeholder="Belgium or 1" required></div>
+          `, "Imports the national-team coach for one side and updates the local managers editor.")}
+        </div>
+      </section>
+
       <section class="grid-2">
         <div class="surface">
           <div class="heading"><h2 class="neon-cyan">Sync Logs</h2></div>
@@ -1364,17 +1587,32 @@ function adminDashboardPage() {
           </div>
         </div>
         <div class="grid-3">
-          ${adminImportCard("Fixtures", "fixtures", sources.fixtures, "Use `/fixtures` shaped rows here.")}
-          ${adminImportCard("Players", "players", sources.players, "Use `/players` or squad rows mapped into player objects.")}
-          ${adminImportCard("Match Stats", "matchPlayerStats", sources.matchPlayerStats, "Set `fantasy_points_override` on a stat row to hard-set a player's points.")}
+          <article class="admin-row">
+            <strong>After official squads</strong>
+            <p>Open <strong>Players</strong>, pull the latest source with <strong>Import reference</strong>, then edit or paste the final squad JSON and save it. Keep the same player ID when updating an existing player so saved teams and match stats stay linked.</p>
+          </article>
+          <article class="admin-row">
+            <strong>Import reference</strong>
+            <p>Copies the current upstream source into the editable local store. Use this when the source data has changed and you want a local version to review or tweak.</p>
+          </article>
+          <article class="admin-row">
+            <strong>Use reference feed</strong>
+            <p>Removes the local override for that dataset. The app goes back to reading the reference source directly for that section.</p>
+          </article>
+        </div>
+        <div class="grid-3">
+          ${adminImportCard("Fixtures", "fixtures", sources.fixtures, "Kickoff times, stage, nations, venue, and the IST matchday windows all come from these rows.")}
+          ${adminImportCard("Players", "players", sources.players, "This is the official player pool: squad membership, price, position, nation, injuries, and display flags.")}
+          ${adminImportCard("Match Stats", "matchPlayerStats", sources.matchPlayerStats, "Per-match stats power fantasy scoring. Set `fantasy_points_override` on a row to hard-set a player's score.")}
         </div>
         <div class="grid-2">
-          ${adminEditorForm("Fixtures", "fixtures", editor.fixtures || [], sources.fixtures, "Full fixture collection used by standings and matchdays.")}
-          ${adminEditorForm("Players", "players", editor.players || [], sources.players, "Prices, positions, flags, injuries, and base point totals.")}
+          ${adminEditorForm("Fixtures", "fixtures", editor.fixtures || [], sources.fixtures, "Full fixture collection used by standings, deadlines, and daily matchday windows.")}
+          ${adminEditorForm("Players", "players", editor.players || [], sources.players, "Official player pool. Update this when final squads are announced or when prices and statuses change.")}
           ${adminEditorForm("Managers", "managers", editor.managers || [], sources.managers, "Fantasy manager prices and nation mappings.")}
           ${adminEditorForm("Goal Events", "goalEvents", editor.goalEvents || [], sources.goalEvents, "Finished-match event feed used in fixture detail views.")}
           ${adminEditorForm("Match Player Stats", "matchPlayerStats", editor.matchPlayerStats || [], sources.matchPlayerStats, "Per-match stat rows. Add `fantasy_points_override` to force a player's score.")}
           ${adminEditorForm("Scoring Rules", "scoringRules", editor.scoringRules || {}, sources.scoringRules, "Change fantasy point rules and league day-award values.")}
+          ${adminEditorForm("Deadline Overrides", "deadlineOverrides", editor.deadlineOverrides || {}, sources.deadlineOverrides, "Optional manual deadline overrides by IST matchday date. Example: { \"2026-06-12\": { \"deadline_at\": \"2026-06-11T21:30:00+05:30\", \"note\": \"Admin extension\" } }")}
         </div>
       </section>
     </div>
@@ -1392,6 +1630,20 @@ function adminImportCard(title, kind, source, note) {
         <button class="ghost-button" data-action="admin-reset-editor" data-kind="${kind}">Use reference feed</button>
       </div>
     </article>
+  `;
+}
+
+function adminApiImportForm(title, kind, fieldsHtml, note) {
+  return `
+    <form class="admin-row stack" data-action="admin-import-api">
+      <input type="hidden" name="kind" value="${kind}">
+      <strong>${escapeHtml(title)}</strong>
+      <p>${escapeHtml(note)}</p>
+      ${fieldsHtml}
+      <div class="button-row">
+        <button class="button primary" type="submit">Import via API</button>
+      </div>
+    </form>
   `;
 }
 
@@ -1568,6 +1820,7 @@ function render() {
   appNode.innerHTML = renderPage();
   renderOverlays();
   restoreFocus();
+  refreshMatchdayCountdown();
 }
 
 function scheduleRender(delay = 180) {
@@ -1752,6 +2005,8 @@ async function loadPublicData() {
     fixtures: payload.standings?.fixtures || [],
     comingUp: payload.comingUp || { day: null, fixtures: [] },
     standings: payload.standings || null,
+    deadlineOverrides: payload.deadlineOverrides || {},
+    lockStatus: payload.lockStatus || null,
     players: state.publicData.players || [],
     managers: state.publicData.managers || [],
     faqs: state.publicData.faqs || [],
@@ -1840,6 +2095,7 @@ async function reloadAuthedData() {
 }
 
 async function boot() {
+  startMatchdayTicker();
   render();
   try {
     const tasks = [loadPublicData()];
@@ -1895,17 +2151,33 @@ document.addEventListener("click", async (event) => {
     } else if (action === "fantasy-tile") {
       state.ui.fantasyTile = actionNode.dataset.value;
     } else if (action === "toggle-player") {
+      if (fantasyEditsLocked()) {
+        pushToast("error", noEditWindowMessage());
+        return;
+      }
       togglePlayer(actionNode.dataset.player);
       return;
     } else if (action === "toggle-starter") {
+      if (fantasyEditsLocked()) {
+        pushToast("error", noEditWindowMessage());
+        return;
+      }
       toggleStarter(actionNode.dataset.player);
       return;
     } else if (action === "set-captain") {
+      if (fantasyEditsLocked()) {
+        pushToast("error", noEditWindowMessage());
+        return;
+      }
       state.fantasyDraft.captain_id = actionNode.dataset.player;
       if (state.fantasyDraft.vice_captain_id === state.fantasyDraft.captain_id) {
         state.fantasyDraft.vice_captain_id = state.fantasyDraft.starters.find((id) => id !== state.fantasyDraft.captain_id) || "";
       }
     } else if (action === "set-vice") {
+      if (fantasyEditsLocked()) {
+        pushToast("error", noEditWindowMessage());
+        return;
+      }
       if (actionNode.dataset.player !== state.fantasyDraft.captain_id) {
         state.fantasyDraft.vice_captain_id = actionNode.dataset.player;
       }
@@ -1946,9 +2218,14 @@ document.addEventListener("click", async (event) => {
       pushToast("success", "Local WC26 data deleted.");
       return;
     } else if (action === "save-team") {
+      if (fantasyEditsLocked()) {
+        pushToast("error", noEditWindowMessage());
+        return;
+      }
+      const editingIndex = matchdayStatus().editingMatchdayIndex;
       await api("/api/fantasy/team", { method: "POST", body: JSON.stringify(state.fantasyDraft) });
       await reloadAuthedData();
-      pushToast("success", "Fantasy XI saved.");
+      pushToast("success", `Fantasy XI saved for Matchday ${editingIndex || "next"}.`);
     } else if (action === "focus-player") {
       const player = playerMap()[actionNode.dataset.player];
       if (player) pushToast("success", `${player.name} is in your starting XI.`);
@@ -2002,6 +2279,11 @@ document.addEventListener("change", async (event) => {
     state.ui.fixturesGroup = target.value;
     changed = true;
   } else if (target.matches("[data-action='manager-select']")) {
+    if (fantasyEditsLocked()) {
+      target.value = state.fantasyDraft.manager_id || "";
+      pushToast("error", noEditWindowMessage());
+      return;
+    }
     state.fantasyDraft.manager_id = target.value;
     changed = true;
   }
@@ -2043,6 +2325,10 @@ document.addEventListener("input", (event) => {
     rememberFocus(target);
     changed = true;
   } else if (target.matches("[data-action='team-name']")) {
+    if (fantasyEditsLocked()) {
+      target.value = state.fantasyDraft.team_name || "";
+      return;
+    }
     state.fantasyDraft.team_name = target.value.slice(0, 32);
     rememberFocus(target);
     changed = true;
@@ -2107,6 +2393,12 @@ document.addEventListener("submit", async (event) => {
         body: JSON.stringify({ kind: data.kind, payload: parsed }),
       });
       pushToast("success", `${data.kind} saved.`);
+      render();
+      return;
+    }
+    if (form.dataset.action === "admin-import-api") {
+      state.admin.dashboard = await adminApi("/api/admin/import/api", { method: "POST", body: JSON.stringify(data) });
+      pushToast("success", state.admin.dashboard.apiImport?.message || "API import completed.");
       render();
       return;
     }
