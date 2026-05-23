@@ -23,6 +23,9 @@ Set:
 - `API_FOOTBALL_KEY`
 - `ADMIN_EMAIL`
 - `ADMIN_PASSWORD`
+
+Optional if you want to override the built-in auth project:
+
 - `SUPABASE_URL`
 - `SUPABASE_ANON_KEY`
 
@@ -33,7 +36,7 @@ Recommended option: Render Free Web Service.
 1. Push this folder to a GitHub repository.
 2. Open Render and create a new Blueprint from that repository.
 3. Render will read `render.yaml`.
-4. Add the environment variables listed above.
+4. Add `API_FOOTBALL_KEY`, `ADMIN_EMAIL`, and `ADMIN_PASSWORD`.
 5. Deploy.
 
 The app uses the host-provided `PORT` variable automatically.
