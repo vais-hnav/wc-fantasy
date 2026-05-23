@@ -69,6 +69,8 @@ def load_dotenv():
 
 load_dotenv()
 
+DB_READY = False
+
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -153,17 +155,106 @@ def with_cache(name, max_age_seconds, producer, fallback):
         return fallback
 
 
+def database_url():
+    return os.getenv("DATABASE_URL", "").strip()
+
+
+def store_name(path):
+    return Path(path).stem
+
+
+def clone_default(default):
+    return json.loads(json.dumps(default))
+
+
+def ensure_database():
+    global DB_READY
+    if DB_READY:
+        return
+    try:
+        import psycopg
+    except ImportError as exc:
+        raise RuntimeError("DATABASE_URL is set, but psycopg is not installed.") from exc
+    with FILE_LOCK:
+        if DB_READY:
+            return
+        with psycopg.connect(database_url(), autocommit=True) as conn:
+            conn.execute(
+                """
+                create table if not exists app_stores (
+                    name text primary key,
+                    payload jsonb not null,
+                    updated_at timestamptz not null default now()
+                )
+                """
+            )
+        DB_READY = True
+
+
+def load_database_store(path, default):
+    from psycopg.types.json import Jsonb
+
+    ensure_database()
+    name = store_name(path)
+    with FILE_LOCK:
+        import psycopg
+
+        with psycopg.connect(database_url(), autocommit=True) as conn:
+            row = conn.execute("select payload from app_stores where name = %s", (name,)).fetchone()
+            if row:
+                return row[0]
+            payload = clone_default(default)
+            if Path(path).exists():
+                try:
+                    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    payload = clone_default(default)
+            conn.execute(
+                """
+                insert into app_stores (name, payload, updated_at)
+                values (%s, %s, now())
+                on conflict (name) do nothing
+                """,
+                (name, Jsonb(payload)),
+            )
+            return payload
+
+
+def save_database_store(path, payload):
+    from psycopg.types.json import Jsonb
+
+    ensure_database()
+    with FILE_LOCK:
+        import psycopg
+
+        with psycopg.connect(database_url(), autocommit=True) as conn:
+            conn.execute(
+                """
+                insert into app_stores (name, payload, updated_at)
+                values (%s, %s, now())
+                on conflict (name)
+                do update set payload = excluded.payload, updated_at = now()
+                """,
+                (store_name(path), Jsonb(payload)),
+            )
+
+
 def load_store(path, default):
+    if database_url():
+        return load_database_store(path, default)
     with FILE_LOCK:
         if not path.exists():
-            return json.loads(json.dumps(default))
+            return clone_default(default)
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            return json.loads(json.dumps(default))
+            return clone_default(default)
 
 
 def save_store(path, payload):
+    if database_url():
+        save_database_store(path, payload)
+        return
     temp = path.with_suffix(path.suffix + ".tmp")
     with FILE_LOCK:
         temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
