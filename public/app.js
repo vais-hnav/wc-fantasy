@@ -301,6 +301,10 @@ function money(value) {
   return `£${Number(value || 0).toFixed(1)}`;
 }
 
+function prettyJson(value) {
+  return JSON.stringify(value ?? null, null, 2);
+}
+
 function initials(name) {
   const label = (name || "P").trim();
   return label.charAt(0).toUpperCase();
@@ -1278,6 +1282,8 @@ function adminDashboardPage() {
   const usage = dashboard.usage || {};
   const provider = dashboard.provider || {};
   const counts = dashboard.counts || {};
+  const editor = dashboard.editor || {};
+  const sources = editor.sources || {};
   return `
     <div class="stack">
       <section class="admin-hero surface">
@@ -1338,7 +1344,64 @@ function adminDashboardPage() {
           <div class="admin-list" style="margin-top:12px">${adminDailyAwardRows(dashboard.leagueDailyPoints || {})}</div>
         </div>
       </section>
+
+      <section class="surface stack">
+        <div class="heading">
+          <div>
+            <h2 class="neon-magenta">Data Studio</h2>
+            <p class="subcopy">Import reference data, switch to local editable copies, and save direct JSON changes that the live app uses immediately.</p>
+          </div>
+        </div>
+        <div class="grid-3">
+          ${adminImportCard("Fixtures", "fixtures", sources.fixtures, "Use `/fixtures` shaped rows here.")}
+          ${adminImportCard("Players", "players", sources.players, "Use `/players` or squad rows mapped into player objects.")}
+          ${adminImportCard("Match Stats", "matchPlayerStats", sources.matchPlayerStats, "Set `fantasy_points_override` on a stat row to hard-set a player's points.")}
+        </div>
+        <div class="grid-2">
+          ${adminEditorForm("Fixtures", "fixtures", editor.fixtures || [], sources.fixtures, "Full fixture collection used by standings and matchdays.")}
+          ${adminEditorForm("Players", "players", editor.players || [], sources.players, "Prices, positions, flags, injuries, and base point totals.")}
+          ${adminEditorForm("Managers", "managers", editor.managers || [], sources.managers, "Fantasy manager prices and nation mappings.")}
+          ${adminEditorForm("Goal Events", "goalEvents", editor.goalEvents || [], sources.goalEvents, "Finished-match event feed used in fixture detail views.")}
+          ${adminEditorForm("Match Player Stats", "matchPlayerStats", editor.matchPlayerStats || [], sources.matchPlayerStats, "Per-match stat rows. Add `fantasy_points_override` to force a player's score.")}
+          ${adminEditorForm("Scoring Rules", "scoringRules", editor.scoringRules || {}, sources.scoringRules, "Change fantasy point rules and league day-award values.")}
+        </div>
+      </section>
     </div>
+  `;
+}
+
+function adminImportCard(title, kind, source, note) {
+  return `
+    <article class="admin-row">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(`Source: ${source || "reference"}`)}</span>
+      <p>${escapeHtml(note)}</p>
+      <div class="button-row">
+        <button class="ghost-button accent" data-action="admin-import-editor" data-kind="${kind}">Import reference</button>
+        <button class="ghost-button" data-action="admin-reset-editor" data-kind="${kind}">Use reference feed</button>
+      </div>
+    </article>
+  `;
+}
+
+function adminEditorForm(title, kind, payload, source, hint) {
+  return `
+    <form class="surface stack" data-action="admin-save-editor">
+      <input type="hidden" name="kind" value="${kind}">
+      <div class="heading">
+        <div>
+          <h2 class="neon-cyan">${escapeHtml(title)}</h2>
+          <p class="subcopy">${escapeHtml(hint)}</p>
+        </div>
+        <span class="tiny-chip">${escapeHtml(source || "reference")}</span>
+      </div>
+      <textarea class="textarea admin-json" name="payload" spellcheck="false">${escapeHtml(prettyJson(payload))}</textarea>
+      <div class="button-row">
+        <button class="ghost-button accent" type="button" data-action="admin-import-editor" data-kind="${kind}">Import reference</button>
+        <button class="ghost-button" type="button" data-action="admin-reset-editor" data-kind="${kind}">Use reference feed</button>
+        <button class="button secondary" type="submit">Save ${escapeHtml(title)}</button>
+      </div>
+    </form>
   `;
 }
 
@@ -1850,6 +1913,12 @@ document.addEventListener("click", async (event) => {
     } else if (action === "admin-reset-quota") {
       state.admin.dashboard = await adminApi("/api/admin/quota/reset", { method: "POST", body: JSON.stringify({}) });
       pushToast("success", "Local quota tracker reset.");
+    } else if (action === "admin-import-editor") {
+      state.admin.dashboard = await adminApi("/api/admin/editor/import", { method: "POST", body: JSON.stringify({ kind: actionNode.dataset.kind }) });
+      pushToast("success", `${actionNode.dataset.kind} imported into the editable store.`);
+    } else if (action === "admin-reset-editor") {
+      state.admin.dashboard = await adminApi("/api/admin/editor/reset", { method: "POST", body: JSON.stringify({ kind: actionNode.dataset.kind }) });
+      pushToast("success", `${actionNode.dataset.kind} switched back to the reference feed.`);
     } else if (action === "admin-clear-support") {
       state.admin.dashboard = await adminApi("/api/admin/support/clear", { method: "POST", body: JSON.stringify({ id: actionNode.dataset.supportId }) });
       pushToast("success", "Support request cleared.");
@@ -1975,6 +2044,21 @@ document.addEventListener("submit", async (event) => {
       state.ui.authForms.admin.password = "";
       state.ui.authFocus = null;
       pushToast("success", "Admin signed in.");
+      render();
+      return;
+    }
+    if (form.dataset.action === "admin-save-editor") {
+      let parsed;
+      try {
+        parsed = JSON.parse(data.payload || "");
+      } catch {
+        throw new Error("Editor content must be valid JSON.");
+      }
+      state.admin.dashboard = await adminApi("/api/admin/editor/save", {
+        method: "POST",
+        body: JSON.stringify({ kind: data.kind, payload: parsed }),
+      });
+      pushToast("success", `${data.kind} saved.`);
       render();
       return;
     }

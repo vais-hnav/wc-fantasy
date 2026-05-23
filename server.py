@@ -40,6 +40,12 @@ API_SYNC_LOGS_STORE = DATA_DIR / "api_sync_logs.json"
 RAW_API_RESPONSES_STORE = DATA_DIR / "raw_api_responses.json"
 LEAGUE_DAILY_POINTS_STORE = DATA_DIR / "league_daily_points.json"
 ADMIN_SESSIONS_STORE = DATA_DIR / "admin_sessions.json"
+EDITABLE_FIXTURES_STORE = DATA_DIR / "editable_fixtures.json"
+EDITABLE_PLAYERS_STORE = DATA_DIR / "editable_players.json"
+EDITABLE_MANAGERS_STORE = DATA_DIR / "editable_managers.json"
+EDITABLE_GOAL_EVENTS_STORE = DATA_DIR / "editable_goal_events.json"
+EDITABLE_MATCH_PLAYER_STATS_STORE = DATA_DIR / "editable_match_player_stats.json"
+SCORING_RULES_STORE = DATA_DIR / "scoring_rules.json"
 
 HOST_NATIONS = ["USA", "CAN", "MEX"]
 GROUP_LETTERS = list("ABCDEFGHIJKL")
@@ -53,6 +59,14 @@ API_SPORTS_DAILY_LIMIT = 100
 API_SPORTS_DAILY_RESERVE = 30
 API_SPORTS_MINUTE_LIMIT = 10
 API_SPORTS_RESET_UTC = "00:00"
+EDITOR_KIND_CONFIG = {
+    "fixtures": EDITABLE_FIXTURES_STORE,
+    "players": EDITABLE_PLAYERS_STORE,
+    "managers": EDITABLE_MANAGERS_STORE,
+    "goalEvents": EDITABLE_GOAL_EVENTS_STORE,
+    "matchPlayerStats": EDITABLE_MATCH_PLAYER_STATS_STORE,
+    "scoringRules": SCORING_RULES_STORE,
+}
 
 
 def load_dotenv():
@@ -294,6 +308,55 @@ def fetch_table(table, cache_seconds=900, params=None, fallback=None):
     return with_cache(table, cache_seconds, producer, fallback)
 
 
+def editable_rows(store_path, supplier):
+    rows = load_store(store_path, [])
+    return rows if rows else supplier()
+
+
+def store_has_local_rows(store_path):
+    rows = load_store(store_path, [])
+    return bool(rows)
+
+
+def scoring_rules_default():
+    return {
+        "appearance_under_60": 1,
+        "appearance_60_plus": 2,
+        "assist": 3,
+        "save_block": 3,
+        "save_points": 1,
+        "penalty_save": 5,
+        "goals_conceded_block": 2,
+        "goals_conceded_penalty": -1,
+        "penalty_miss": -2,
+        "yellow_card": -1,
+        "red_card": -3,
+        "own_goal": -2,
+        "goal_points": dict(FPL_GOAL_POINTS),
+        "clean_sheet_points": dict(FPL_CLEAN_SHEET_POINTS),
+        "league_awards": {"first": 3, "second": 1, "rest": 0},
+    }
+
+
+def current_scoring_rules():
+    stored = load_store(SCORING_RULES_STORE, {})
+    rules = scoring_rules_default()
+    goal_points = dict(rules["goal_points"])
+    goal_points.update(stored.get("goal_points") or {})
+    clean_sheet_points = dict(rules["clean_sheet_points"])
+    clean_sheet_points.update(stored.get("clean_sheet_points") or {})
+    league_awards = dict(rules["league_awards"])
+    league_awards.update(stored.get("league_awards") or {})
+    for key, value in stored.items():
+        if key in {"goal_points", "clean_sheet_points", "league_awards"}:
+            continue
+        rules[key] = value
+    rules["goal_points"] = goal_points
+    rules["clean_sheet_points"] = clean_sheet_points
+    rules["league_awards"] = league_awards
+    return rules
+
+
 def get_nations():
     return fetch_table(
         "nations",
@@ -302,7 +365,7 @@ def get_nations():
     )
 
 
-def get_fixtures():
+def get_fixtures_reference():
     return fetch_table(
         "fixtures",
         params={"select": "*", "order": "kickoff_at.asc"},
@@ -310,7 +373,11 @@ def get_fixtures():
     )
 
 
-def get_players():
+def get_fixtures():
+    return editable_rows(EDITABLE_FIXTURES_STORE, get_fixtures_reference)
+
+
+def get_players_reference():
     return fetch_table(
         "players",
         params={"select": "*", "order": "price_millions.desc,name.asc"},
@@ -318,12 +385,20 @@ def get_players():
     )
 
 
-def get_managers():
+def get_players():
+    return editable_rows(EDITABLE_PLAYERS_STORE, get_players_reference)
+
+
+def get_managers_reference():
     return fetch_table(
         "managers",
         params={"select": "*", "order": "price_millions.desc,name.asc"},
         fallback=[],
     )
+
+
+def get_managers():
+    return editable_rows(EDITABLE_MANAGERS_STORE, get_managers_reference)
 
 
 def get_community_posts():
@@ -342,7 +417,7 @@ def get_news_articles():
     )
 
 
-def get_match_goal_events():
+def get_match_goal_events_reference():
     return fetch_table(
         "match_goal_events",
         params={"select": "*", "order": "minute.asc"},
@@ -350,12 +425,20 @@ def get_match_goal_events():
     )
 
 
-def get_match_player_stats():
+def get_match_goal_events():
+    return editable_rows(EDITABLE_GOAL_EVENTS_STORE, get_match_goal_events_reference)
+
+
+def get_match_player_stats_reference():
     return fetch_table(
         "match_player_stats",
         params={"select": "*", "order": "fantasy_points.desc"},
         fallback=[],
     )
+
+
+def get_match_player_stats():
+    return editable_rows(EDITABLE_MATCH_PLAYER_STATS_STORE, get_match_player_stats_reference)
 
 
 def nation_map():
@@ -867,6 +950,16 @@ def stat_bool(row, *names):
 
 
 def fpl_points_for_stat(row, position):
+    override = row.get("fantasy_points_override")
+    if override is None:
+        override = row.get("manual_points")
+    if override is not None and override != "":
+        try:
+            return int(float(override))
+        except (TypeError, ValueError):
+            pass
+
+    rules = current_scoring_rules()
     minutes = int(stat_number(row, "minutes", "minutes_played", "mins"))
     goals = stat_number(row, "goals", "goals_scored")
     assists = stat_number(row, "assists")
@@ -882,22 +975,25 @@ def fpl_points_for_stat(row, position):
 
     points = 0
     if minutes > 0:
-        points += 2 if minutes >= 60 else 1
-    points += goals * FPL_GOAL_POINTS.get(position, 0)
-    points += assists * 3
+        points += int(rules["appearance_60_plus"]) if minutes >= 60 else int(rules["appearance_under_60"])
+    points += goals * int((rules.get("goal_points") or {}).get(position, 0))
+    points += assists * int(rules.get("assist", 3))
     if position in {"GK", "DEF", "MID"}:
-        points += clean_sheets * FPL_CLEAN_SHEET_POINTS[position]
+        clean_sheet_points = int((rules.get("clean_sheet_points") or {}).get(position, 0))
+        points += clean_sheets * clean_sheet_points
         if clean_sheet and minutes >= 60 and clean_sheets == 0:
-            points += FPL_CLEAN_SHEET_POINTS[position]
+            points += clean_sheet_points
     if position == "GK":
-        points += int(saves // 3)
-        points += penalty_saves * 5
+        save_block = max(1, int(rules.get("save_block", 3) or 3))
+        points += int(saves // save_block) * int(rules.get("save_points", 1))
+        points += penalty_saves * int(rules.get("penalty_save", 5))
     if position in {"GK", "DEF"}:
-        points -= int(goals_conceded // 2)
-    points -= penalty_misses * 2
-    points -= yellow_cards
-    points -= red_cards * 3
-    points -= own_goals * 2
+        conceded_block = max(1, int(rules.get("goals_conceded_block", 2) or 2))
+        points += int(goals_conceded // conceded_block) * int(rules.get("goals_conceded_penalty", -1))
+    points += penalty_misses * int(rules.get("penalty_miss", -2))
+    points += yellow_cards * int(rules.get("yellow_card", -1))
+    points += red_cards * int(rules.get("red_card", -3))
+    points += own_goals * int(rules.get("own_goal", -2))
     return int(points)
 
 
@@ -1284,6 +1380,25 @@ def recompute_all_league_daily_scores():
     return updated
 
 
+def refresh_all_fantasy_state():
+    teams = load_store(FANTASY_STORE, {})
+    profiles = load_store(PROFILE_STORE, {})
+    for user_id, team in teams.items():
+        refreshed = dict(team)
+        refreshed.update(compute_team_metrics(team))
+        teams[user_id] = refreshed
+        if user_id in profiles:
+            profiles[user_id]["fantasy_points"] = refreshed.get("projected_points", 0)
+            profiles[user_id]["updated_at"] = now_iso()
+    save_store(FANTASY_STORE, teams)
+    save_store(PROFILE_STORE, profiles)
+    return {
+        "teams": len(teams),
+        "profiles": len(profiles),
+        "leagues": len(recompute_all_league_daily_scores()),
+    }
+
+
 def get_fantasy_team(user_id):
     teams = load_store(FANTASY_STORE, {})
     return teams.get(user_id, team_default())
@@ -1656,6 +1771,116 @@ def admin_auth_required(handler):
     return session
 
 
+def editor_reference_payload(kind):
+    suppliers = {
+        "fixtures": get_fixtures_reference,
+        "players": get_players_reference,
+        "managers": get_managers_reference,
+        "goalEvents": get_match_goal_events_reference,
+        "matchPlayerStats": get_match_player_stats_reference,
+        "scoringRules": scoring_rules_default,
+    }
+    supplier = suppliers.get(kind)
+    return supplier() if supplier else None
+
+
+def editor_current_payload(kind):
+    suppliers = {
+        "fixtures": get_fixtures,
+        "players": get_players,
+        "managers": get_managers,
+        "goalEvents": get_match_goal_events,
+        "matchPlayerStats": get_match_player_stats,
+        "scoringRules": current_scoring_rules,
+    }
+    supplier = suppliers.get(kind)
+    return supplier() if supplier else None
+
+
+def editor_source_flags():
+    return {
+        "fixtures": "local" if store_has_local_rows(EDITABLE_FIXTURES_STORE) else "reference",
+        "players": "local" if store_has_local_rows(EDITABLE_PLAYERS_STORE) else "reference",
+        "managers": "local" if store_has_local_rows(EDITABLE_MANAGERS_STORE) else "reference",
+        "goalEvents": "local" if store_has_local_rows(EDITABLE_GOAL_EVENTS_STORE) else "reference",
+        "matchPlayerStats": "local" if store_has_local_rows(EDITABLE_MATCH_PLAYER_STATS_STORE) else "reference",
+        "scoringRules": "local" if load_store(SCORING_RULES_STORE, {}) else "default",
+    }
+
+
+def validate_editor_payload(kind, payload):
+    if kind == "scoringRules":
+        if not isinstance(payload, dict):
+            return None, "Scoring rules must be a JSON object."
+        merged = scoring_rules_default()
+        for key in [
+            "appearance_under_60",
+            "appearance_60_plus",
+            "assist",
+            "save_block",
+            "save_points",
+            "penalty_save",
+            "goals_conceded_block",
+            "goals_conceded_penalty",
+            "penalty_miss",
+            "yellow_card",
+            "red_card",
+            "own_goal",
+        ]:
+            if key in payload:
+                merged[key] = int(payload.get(key) or 0)
+        for key in ["goal_points", "clean_sheet_points", "league_awards"]:
+            if key in payload:
+                if not isinstance(payload[key], dict):
+                    return None, f"{key} must be an object."
+                merged[key].update(payload[key])
+        return merged, None
+
+    if not isinstance(payload, list):
+        return None, f"{kind} must be a JSON array."
+    normalized = []
+    for index, row in enumerate(payload, start=1):
+        if not isinstance(row, dict):
+            return None, f"{kind} row {index} must be an object."
+        item = dict(row)
+        if not item.get("id"):
+            item["id"] = uuid.uuid4().hex
+        normalized.append(item)
+    return normalized, None
+
+
+def save_editor_payload(kind, payload):
+    store_path = EDITOR_KIND_CONFIG.get(kind)
+    if not store_path:
+        return None, "Unknown editor kind."
+    normalized, error = validate_editor_payload(kind, payload)
+    if error:
+        return None, error
+    save_store(store_path, normalized)
+    if kind in {"fixtures", "players", "managers", "goalEvents", "matchPlayerStats", "scoringRules"}:
+        refreshed = refresh_all_fantasy_state()
+    else:
+        refreshed = None
+    return {"saved": kind, "refresh": refreshed}, None
+
+
+def import_editor_payload(kind):
+    payload = editor_reference_payload(kind)
+    if payload is None:
+        return None, "Unknown editor kind."
+    return save_editor_payload(kind, payload)
+
+
+def reset_editor_payload(kind):
+    store_path = EDITOR_KIND_CONFIG.get(kind)
+    if not store_path:
+        return None, "Unknown editor kind."
+    empty = {} if kind == "scoringRules" else []
+    save_store(store_path, empty)
+    refreshed = refresh_all_fantasy_state()
+    return {"reset": kind, "refresh": refreshed}
+
+
 def admin_dashboard_payload():
     profiles = load_store(PROFILE_STORE, {})
     teams = load_store(FANTASY_STORE, {})
@@ -1685,6 +1910,15 @@ def admin_dashboard_payload():
         ],
         "support": support_messages[:12],
         "leagueDailyPoints": load_store(LEAGUE_DAILY_POINTS_STORE, {}),
+        "editor": {
+            "sources": editor_source_flags(),
+            "fixtures": get_fixtures(),
+            "players": get_players(),
+            "managers": get_managers(),
+            "goalEvents": get_match_goal_events(),
+            "matchPlayerStats": get_match_player_stats(),
+            "scoringRules": current_scoring_rules(),
+        },
     }
 
 
@@ -1836,6 +2070,36 @@ class WC26Handler(SimpleHTTPRequestHandler):
             if not clear_support_request(payload.get("id")):
                 return error_response(self, "Support request not found.", HTTPStatus.NOT_FOUND)
             return json_response(self, admin_dashboard_payload())
+
+        if path == "/api/admin/editor/import":
+            if not admin_auth_required(self):
+                return
+            result, error = import_editor_payload(payload.get("kind"))
+            if error:
+                return error_response(self, error)
+            response = admin_dashboard_payload()
+            response["editorAction"] = result
+            return json_response(self, response)
+
+        if path == "/api/admin/editor/reset":
+            if not admin_auth_required(self):
+                return
+            result = reset_editor_payload(payload.get("kind"))
+            if not result:
+                return error_response(self, "Unknown editor kind.")
+            response = admin_dashboard_payload()
+            response["editorAction"] = result
+            return json_response(self, response)
+
+        if path == "/api/admin/editor/save":
+            if not admin_auth_required(self):
+                return
+            result, error = save_editor_payload(payload.get("kind"), payload.get("payload"))
+            if error:
+                return error_response(self, error)
+            response = admin_dashboard_payload()
+            response["editorAction"] = result
+            return json_response(self, response)
 
         if path == "/api/auth/signin":
             email = (payload.get("email") or "").strip()
