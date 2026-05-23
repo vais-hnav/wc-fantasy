@@ -1559,72 +1559,6 @@ svg {
   padding: 18px;
 }
 
-.phone-preview-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.phone-preview {
-  border-radius: 22px;
-  border: 1px solid rgba(16, 24, 40, 0.12);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(239, 243, 247, 0.96));
-  padding: 12px;
-  aspect-ratio: 9 / 18;
-  display: grid;
-  gap: 10px;
-}
-
-.phone-top {
-  font-family: Anton, Impact, sans-serif;
-  font-size: 14px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
-.mini-bar,
-.mini-line,
-.mini-chip,
-.mini-card {
-  border-radius: 10px;
-  background: rgba(16, 24, 40, 0.06);
-}
-
-.mini-bar {
-  height: 18px;
-}
-
-.mini-line {
-  height: 12px;
-}
-
-.mini-card {
-  height: 58px;
-}
-
-.mini-pitch {
-  position: relative;
-  flex: 1;
-  border-radius: 16px;
-  background: repeating-linear-gradient(
-    to bottom,
-    #41935c 0%,
-    #41935c 10%,
-    #316d46 10%,
-    #316d46 20%
-  );
-  border: 1px solid rgba(16, 24, 40, 0.12);
-}
-
-.mini-pitch span {
-  position: absolute;
-  width: 14px;
-  height: 14px;
-  border-radius: 999px;
-  background: var(--gold);
-  transform: translate(-50%, -50%);
-}
-
 .host-row {
   justify-content: center;
   align-items: center;
@@ -1898,18 +1832,6 @@ svg {
   background: rgba(3, 6, 16, 0.68);
 }
 
-.phone-preview {
-  border-color: var(--line);
-  background: linear-gradient(180deg, rgba(14, 21, 44, 0.96), rgba(9, 13, 29, 0.96));
-}
-
-.mini-bar,
-.mini-line,
-.mini-chip,
-.mini-card {
-  background: rgba(220, 238, 255, 0.1);
-}
-
 .toast {
   background: rgba(9, 14, 31, 0.94);
   color: var(--text);
@@ -2007,8 +1929,7 @@ svg {
 
 @media (max-width: 720px) {
   .feature-grid,
-  .grid-2,
-  .phone-preview-grid {
+  .grid-2 {
     grid-template-columns: 1fr;
   }
 

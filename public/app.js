@@ -505,8 +505,8 @@ function landingPage() {
       </section>
 
       <div class="button-row hero-actions" style="margin-top: 22px">
-        <button class="button primary" data-action="open-screens">${icon("photo")} In-Game Screens</button>
         <button class="button secondary" data-route="${state.session.user ? "/fantasy" : "/auth"}">Continue to Fantasy XI ${icon("arrowRight")}</button>
+        <button class="ghost-button accent" data-route="/standings">Open standings</button>
       </div>
 
       <div class="feature-grid" style="margin-top: 22px">
@@ -572,51 +572,6 @@ function landingStandingsPreview() {
     </div>
     <div class="group-dots">${GROUPS.map((group, index) => `<button class="group-dot ${index === state.ui.standingsGroup ? "active" : ""}" data-action="pick-group" data-group="${index}" aria-label="Group ${group}"></button>`).join("")}</div>
     <p class="small-meta" style="margin-top: 12px; text-align: center">Top 2 in each group plus the 8 best third-place teams advance to the Round of 32.</p>
-  `;
-}
-
-function screenModalHtml() {
-  return `
-    <div class="modal">
-      <div class="modal-backdrop" data-action="close-modal"></div>
-      <div class="modal-card">
-        <div class="heading">
-          <div>
-            <h2 class="neon-magenta">In-Game Screens</h2>
-            <p class="subcopy">The same core surfaces now read like a polished league desk instead of a neon demo shell.</p>
-          </div>
-          <button class="icon-button" data-action="close-modal">×</button>
-        </div>
-        <div class="phone-preview-grid" style="margin-top: 16px">
-          <div class="phone-preview">
-            <div class="phone-top">Fantasy XI</div>
-            <div class="mini-bar"></div>
-            <div class="mini-pitch">
-              <span style="left:50%;top:84%"></span><span style="left:18%;top:66%"></span><span style="left:38%;top:68%"></span><span style="left:62%;top:68%"></span><span style="left:82%;top:66%"></span>
-              <span style="left:18%;top:48%"></span><span style="left:38%;top:44%"></span><span style="left:62%;top:44%"></span><span style="left:82%;top:48%"></span>
-              <span style="left:35%;top:22%"></span><span style="left:65%;top:22%"></span>
-            </div>
-            <div class="mini-card"></div>
-          </div>
-          <div class="phone-preview">
-            <div class="phone-top">Standings</div>
-            <div class="mini-bar"></div>
-            <div class="mini-card"></div>
-            <div class="mini-card"></div>
-            <div class="mini-card"></div>
-            <div class="mini-line"></div>
-          </div>
-          <div class="phone-preview">
-            <div class="phone-top">Admin</div>
-            <div class="mini-bar"></div>
-            <div class="mini-card"></div>
-            <div class="mini-card"></div>
-            <div class="mini-card"></div>
-            <div class="mini-line"></div>
-          </div>
-        </div>
-      </div>
-    </div>
   `;
 }
 
@@ -1624,7 +1579,6 @@ function restoreFocus() {
 
 function renderModal() {
   if (!state.ui.modal) return "";
-  if (state.ui.modal.type === "screens") return screenModalHtml();
   if (state.ui.modal.type === "reset") {
     return `
       <div class="modal">
@@ -1813,9 +1767,7 @@ document.addEventListener("click", async (event) => {
 
   const action = actionNode.dataset.action;
   try {
-    if (action === "open-screens") {
-      state.ui.modal = { type: "screens" };
-    } else if (action === "close-modal") {
+    if (action === "close-modal") {
       state.ui.modal = null;
     } else if (action === "cycle-group") {
       state.ui.standingsGroup = (state.ui.standingsGroup + Number(actionNode.dataset.direction) + GROUPS.length) % GROUPS.length;
